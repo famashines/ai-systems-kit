@@ -1,0 +1,63 @@
+{
+  "name": "@famashines/ai-systems-kit",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared server code for ai-systems services: http, config, observability",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/famashines/ai-systems-kit.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    "./http": {
+      "types": "./dist/http/index.d.ts",
+      "default": "./dist/http/index.js"
+    },
+    "./config": {
+      "types": "./dist/config/index.d.ts",
+      "default": "./dist/config/index.js"
+    },
+    "./observability": {
+      "types": "./dist/observability/index.d.ts",
+      "default": "./dist/observability/index.js"
+    }
+  },
+  "scripts": {
+    "build": "node node_modules/typescript7/bin/tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "check": "node node_modules/typescript7/bin/tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' 'src/**/*.test.ts'",
+    "verify": "npm run check && npm run lint && npm test"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.10.0",
+    "@opentelemetry/exporter-prometheus": "0.300.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "0.300.0",
+    "@opentelemetry/instrumentation-http": "0.300.0",
+    "@opentelemetry/instrumentation-undici": "0.34.0",
+    "@opentelemetry/resources": "3.0.0",
+    "@opentelemetry/sdk-node": "0.300.0",
+    "pino": "10.4.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "eslint": "10.14.0",
+    "prettier": "3.9.10",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-eslint": "8.72.1",
+    "typescript7": "npm:typescript@7.0.2"
+  },
+  "allowScripts": {
+    "protobufjs": false
+  }
+}
