@@ -73,30 +73,18 @@ Call `startTelemetry` before `createService`.
 ## Example service
 
 ```ts
-import { z } from "zod";
 import { commonEnv, loadConfig } from "@famashines/ai-systems-kit/config";
-import { createService, NotFoundError, validate } from "@famashines/ai-systems-kit/http";
+import { createService } from "@famashines/ai-systems-kit/http";
 import { createLogger, startTelemetry } from "@famashines/ai-systems-kit/observability";
 
 const config = loadConfig(commonEnv);
 const { SERVICE_NAME: service, RELEASE: release } = config;
 const telemetry = startTelemetry({ serviceName: service, release });
-const logger = createLogger({ service, release, level: config.LOG_LEVEL });
-const params = z.object({ taskId: z.uuid() });
 const app = createService({
-  logger,
+  logger: createLogger({ service, release, level: config.LOG_LEVEL }),
   metrics: telemetry.metricsHandler,
   closeHooks: [telemetry.shutdown],
-  routes: [
-    {
-      method: "GET",
-      path: "/api/tasks/:taskId",
-      handler: async (request) => {
-        const input = await validate(request, { params });
-        throw new NotFoundError(`Task ${input.params.taskId} does not exist`);
-      },
-    },
-  ],
+  routes: [{ method: "GET", path: "/api/ping", handler: () => ({ body: { ok: true } }) }],
 });
 await app.listen(config.PORT);
 app.handleSignals();

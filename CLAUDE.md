@@ -25,5 +25,14 @@ One folder for each subpath export in `src/`, with an `index.ts`. Tests are
 `typescript-eslint` needs the TypeScript 6 API, and TypeScript 7 has no JS
 API. So `typescript` is `@typescript/typescript6` (only for ESLint), and
 `typescript7` is TypeScript 7 (for `check` and `build`). The scripts call
-`node_modules/typescript7/bin/tsc` directly. Remove the alias when
-`typescript-eslint` supports TypeScript 7.
+`node_modules/typescript7/bin/tsc` directly. Do not run `npx tsc`: it
+gives TypeScript 6. Remove the alias when `typescript-eslint` supports
+TypeScript 7.
+
+## Telemetry and ESM
+
+ESM code does not call `require("node:http")`, so the OpenTelemetry hook
+does not patch it. `startTelemetry` requires `node:http` and `node:https`
+after `sdk.start()` and calls `syncBuiltinESMExports()`. Do not remove
+this: without it the server spans and metrics stop. The test
+`serves custom and http metrics` fails if it goes.
