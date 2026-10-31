@@ -669,6 +669,10 @@ services start only after both end with exit code 0.
 - `nats-streams` logs one publish violation on `$SYS.REQ.USER.INFO`. It
   comes from `nats account info` in the gitops `streams.sh`, and the
   cluster has it too. It does not stop the script.
+- NATS keeps its JetStream data on a tmpfs (owner `1000`). After a
+  restart of `nats` the streams and the messages are gone. Run
+  `npm run dev:up` again: the streams job runs again, and the services
+  make their consumers again.
 - The system has no LLM, budget or conversation services yet (M1). The
   e2e checks the task submit, the read model, the notices and the resume.
 - The service images install kit and contracts from the git tags in their

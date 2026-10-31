@@ -67,7 +67,7 @@ services:
       - ./dev/nats/nats.conf:/etc/nats/nats.conf:ro
       - ./dev/nats/accounts.conf:/etc/nats/accounts.conf:ro
     tmpfs:
-      - /data
+      - /data:uid=1000,gid=1000
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, "http://localhost:8222/healthz?js-enabled-only=true"]
       interval: 2s
