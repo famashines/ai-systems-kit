@@ -59,5 +59,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Debug mongo
+        run: |
+          docker run -d --name dbg mongo:8.0.34 --replSet rs0 --bind_ip_all
+          sleep 15
+          docker ps -a
+          docker logs dbg 2>&1 | tail -40
+          uname -a
+          grep -m1 -o -w 'avx[^ ]*' /proc/cpuinfo | sort -u
+
       - name: Integration tests
         run: npm run test:integration
