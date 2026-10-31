@@ -25,6 +25,12 @@ const isSecret = (key: string): boolean => secretKeys.has(key.toLowerCase().repl
 function censor(value: unknown, ancestors: Set<object>): unknown {
   if (typeof value !== "object" || value === null) return value;
   if (ancestors.has(value)) return "[Circular]";
+  if (value instanceof URL) {
+    if (!value.username && !value.password) return value.href;
+    const user = value.username ? "[Redacted]" : "";
+    const password = value.password ? ":[Redacted]" : "";
+    return `${value.protocol}//${user}${password}@${value.host}${value.pathname}${value.search}${value.hash}`;
+  }
   if (!(value instanceof Error) && "toJSON" in value) return value;
   ancestors.add(value);
   let result: unknown;
@@ -35,7 +41,7 @@ function censor(value: unknown, ancestors: Set<object>): unknown {
       value instanceof Error
         ? {
             ...Object.fromEntries(Object.entries(value)),
-            type: value.name,
+            type: value.constructor.name || value.name,
             message: value.message,
             stack: value.stack,
             ...(value.cause === undefined ? {} : { cause: value.cause }),
@@ -68,6 +74,7 @@ export function createLogger(options: LoggerOptions): Logger {
       level: options.level ?? "info",
       base: { service: options.service, release: options.release },
       formatters: { log: redact },
+      serializers: { err: (error: unknown) => error },
       mixin: () => {
         const span = trace.getActiveSpan()?.spanContext();
         return {

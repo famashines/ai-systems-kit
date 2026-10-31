@@ -48,12 +48,46 @@ test("redacts secrets and prompt text in any case, at any depth", () => {
   assert.equal(entry.at, "1970-01-01T00:00:00.000Z");
   assert.equal(entry.service, "gateway");
   assert.equal(entry.release, "v1.2.3");
-  assert.match(String((entry.err as Record<string, unknown>).message), /request failed/);
+  const logged = entry.err as Record<string, unknown>;
+  assert.equal(logged.type, "Error");
+  assert.equal(logged.message, "request failed");
+  assert.equal((logged.cause as Record<string, unknown>).message, "inner");
   const failure = entry.failure as Record<string, unknown>;
   assert.equal(failure.message, "request failed");
   assert.equal(failure.type, "Error");
   assert.equal((failure.cause as Record<string, unknown>).message, "inner");
   assert.match(String(failure.stack), /request failed/);
+});
+
+test("keeps the error class name as type", () => {
+  const { logger, lines } = capture();
+  class BudgetRefused extends Error {}
+  logger.error(new BudgetRefused("cap reached"));
+  logger.info({ err: new TypeError("bad") }, "typed");
+  const [first, second] = lines.map(
+    (line) => JSON.parse(line) as { err: { type: string; message: string } },
+  );
+  assert.equal(first?.err.type, "BudgetRefused");
+  assert.equal(first.err.message, "cap reached");
+  assert.equal(second?.err.type, "TypeError");
+});
+
+test("redacts the credentials of URL objects", () => {
+  const { logger, lines } = capture();
+  logger.info(
+    {
+      db: new URL("mongodb://user:top-secret-17@db:27017/tasks?replicaSet=rs0"),
+      onlyUser: new URL("https://top-secret-18@example.com/"),
+      plain: new URL("https://example.com/a"),
+    },
+    "urls",
+  );
+  const line = lines.join("");
+  assert.ok(!line.includes("top-secret") && !line.includes("user:"), line);
+  const entry = JSON.parse(line) as Record<string, string>;
+  assert.equal(entry.db, "mongodb://[Redacted]:[Redacted]@db:27017/tasks?replicaSet=rs0");
+  assert.equal(entry.onlyUser, "https://[Redacted]@example.com/");
+  assert.equal(entry.plain, "https://example.com/a");
 });
 
 test("redacts child bindings and survives cycles", () => {
