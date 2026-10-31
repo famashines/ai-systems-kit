@@ -29,5 +29,7 @@ test("observeGauge reads the value at each scrape until it is removed", async ()
   assert.match(await scrape(), /open_things\{stream="VIEWS",otel_scope_name="kit-test"\} 5/);
   remove();
   open = 7;
-  assert.doesNotMatch(await scrape(), /open_things\{.*\} 7/);
+  const last = await scrape();
+  assert.match(last, /open_things\{stream="VIEWS",otel_scope_name="kit-test"\} 5/);
+  assert.doesNotMatch(last, /open_things\{.*\} 7/);
 });
