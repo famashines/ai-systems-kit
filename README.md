@@ -22,16 +22,29 @@ npm install github:famashines/ai-systems-kit#v0.1.0
 ```
 
 npm builds `dist/` with the `prepare` script on install. npm 11 asks for
-approval of that script: add the package to `allowScripts` in the service
-`package.json`.
+approval of install scripts. A service needs these `allowScripts` entries
+in its `package.json` (`npm install-scripts approve <package>` writes the
+first two with the commit of the tag):
 
-The kit installs `@famashines/ai-systems-contracts` (v0.1.0), `mongodb`,
-`@nats-io/transport-node` and `@nats-io/jetstream`. Use the MongoDB and
-NATS types that the kit gives (for example `ClientSession` from the handler
-context). If a service also installs `mongodb`, use the same version as the
-kit, so that there is one copy. `zod` is a peer dependency. `testcontainers`
-is an optional peer dependency: install it as a dev dependency when you use
-`startMongo` or `startNats`.
+```json
+"allowScripts": {
+  "github:famashines/ai-systems-kit#<commit of the kit tag>": true,
+  "github:famashines/ai-systems-contracts#09f6c8c5385e90dd96cdc81fbd5c8c44d7e92257": true,
+  "protobufjs": false
+}
+```
+
+`protobufjs` (from OpenTelemetry) needs no install script. A service that
+installs `testcontainers` also adds `"ssh2": false` and
+`"cpu-features": false` (optional native parts that the tests do not use).
+
+The kit installs `@famashines/ai-systems-contracts` (v0.1.0),
+`@nats-io/transport-node` and `@nats-io/jetstream`. Peer dependencies: a
+service installs `mongodb` (7.8.0) and `zod` (4.6.7) itself, so that it and
+the kit use one copy (two copies break the `Db` and `ClientSession` types
+and `instanceof MongoServerError`). `testcontainers` is an optional peer
+dependency: install it as a dev dependency when you use `startMongo` or
+`startNats`.
 
 ## `./http`
 
@@ -223,6 +236,9 @@ const { events, answer, replayed } = await store.append({
   unique `(streamId, version)`, unique `position`, and
   `(publishedAt, position)`. Only the kit writes to `events`, and it
   changes only `publishedAt`.
+- An event larger than 900 KiB (its JSON) gives
+  `DomainError("payload_too_large", 413)`, and the append writes nothing.
+  NATS refuses messages above 1 MiB, so such an event would stop the relay.
 - No snapshots (ADR 0006).
 
 ## `./messaging`
@@ -247,8 +263,8 @@ const consumer = startConsumer({
   `{ connection, service, logger, ready, close, request, serve }`. The inbox
   prefix is `_INBOX_<service>` (ADR 0023). It waits for the first
   connection, so a service starts its HTTP server only after NATS answers.
-  It reconnects with no limit.
-  `ready` sends a ping. `close` drains the connection.
+  It reconnects with no limit. `ready` sends a ping. `close` drains the
+  connection.
 - `startRelay({ store, nats, streams, pollMs = 1000, batch = 100 })` gives
   `{ ready, close }`. It wakes on a change stream of `events` and also
   polls each `pollMs`. It publishes the events with `publishedAt: null` in
@@ -258,7 +274,15 @@ const consumer = startConsumer({
   stops the batch and tries again after 1, 2, 4 ... 30 s. It never makes
   streams. `ready` is `false` until each stream in `streams` exists
   (`$JS.API.STREAM.INFO.<stream>`).
-- `startConsumer({ nats, db, stream, filter, handler, upcasters, parse, batch = 10 })`
+- A stuck outbox: one event that NATS refuses stops all later events. The
+  relay logs an error at the first failure and then each 30 s while it
+  fails, and it does not change `ready` (the HTTP API stays up). Metrics
+  (through the meter that `startTelemetry` installs; call it before
+  `startRelay`): the gauge `outbox_oldest_pending_seconds` (age of the
+  oldest event that is not published, 0 when the outbox is empty) and the
+  counter `outbox_publish_failures_total`. Each service needs an alert on
+  the gauge, for example above 60 s for 5 min.
+- `startConsumer({ nats, db, stream, filter, handler, upcasters, parse, batch = 10, ordered = false })`
   gives `{ ready, close }`. The durable consumer has the name of the
   service and one fixed `filter`. The kit makes it with
   `$JS.API.CONSUMER.CREATE.<stream>.<service>.<filter>` (create or update),
@@ -271,17 +295,39 @@ const consumer = startConsumer({
   eventId in processed        --> ack, no handler
   handler(event, { session, markProcessed })
     ok                        --> ack
+    MongoDB or NATS is down   --> keep the message, try again locally
     fails, eventId now in processed --> ack
     fails, delivery 1 to 4    --> nak with the backoff delay
-    fails, delivery 5         --> DLQ, ack
+                                  (ordered: keep it, wait, try again locally)
+    fails, delivery 5         --> DLQ, ack after the DLQ PubAck
   ```
 
+- MongoDB or NATS down: a `MongoNetworkError`, `MongoServerSelectionError`
+  (and `PoolClearedError`), a NATS timeout, no responders or connection
+  error, or a socket error (`ECONNRESET`, `EPIPE` ...) does not use a
+  delivery. The kit keeps the message, sends "in progress", and tries
+  again after 1, 2, 4 ... 30 s until MongoDB or NATS is back. It logs an
+  error at the first failure and each 30 s. Only other handler errors count
+  as deliveries.
+- The DLQ publish also tries again until it works. The kit acks the
+  message only after the DLQ PubAck.
 - At least once: a message can come more than one time, for example after
   a crash before the ack. So the handler writes its effect and
   `markProcessed(session)` in one transaction: with
   `session.withTransaction`, or with `store.append({ ..., also:
-markProcessed })`. `processed` keeps event ids for 45 days. A handler
-  with no effect does not have to mark the event.
+markProcessed })`. `markProcessed` throws if the session is not in a
+  transaction. `processed` keeps event ids for 45 days. A handler with no
+  effect does not have to mark the event.
+- Order: without `ordered`, the order of events is not certain. A failed
+  event comes again after the events behind it, and two pods handle
+  messages at the same time. So a handler keeps its own checkpoint for each
+  stream (the last `event.version` that it applied) and checks
+  `event.version` against it. With `ordered: true`, the consumer has
+  `max_ack_pending` 1: NATS gives one message at a time to all pods
+  together, and a failed message stays with its pod and is tried again
+  locally with the backoff steps (then the DLQ after 5 tries). So the next
+  message cannot pass it. This is slower. All pods of a service must use
+  the same `ordered` value.
 - With a backoff, NATS uses the first backoff step (1 s) as the ack wait.
   So the kit sends "in progress" for each message of the batch until it is
   acked. A slow handler does not cause a second delivery.
@@ -289,17 +335,19 @@ markProcessed })`. `processed` keeps event ids for 45 days. A handler
   The data is the original message. Headers: `error-class` (for example
   `ZodError`, `SyntaxError`, `NotFoundError`), `error-message` (at most 500
   printable ASCII characters), and `correlation-id`, `causation-id`,
-  `traceparent` of the original message. A JSON error gives a fixed
-  message, a zod error gives the paths and issue codes only, so no payload
-  value goes in a header. Do not put payload values in the messages of
-  your own errors.
-- If the DLQ publish fails on the last delivery, the message is not acked
-  and NATS does not deliver it again. It stays in the stream, and NATS
-  sends a max deliveries advisory.
+  `traceparent` of the original message.
+- Error text in headers and logs: the kit uses `describeError`. A JSON
+  error gives a fixed message, a zod error gives the paths and issue codes
+  only, and a `MongoServerError` gives its code and code name (its message
+  can contain key values). `./messaging` never logs these raw messages or
+  the stack. The message of your own errors goes to the logs and the DLQ
+  headers: do not put payload values or secrets in it.
 - rpc on core NATS, for `rpc.*` subjects (ADR 0021):
 
   ```ts
-  nats.serve("rpc.budget.reserve", ReserveV1, ReservationV1, (input) => reserve(input));
+  nats.serve("rpc.budget.reserve", ReserveV1, ReservationV1, (input) => reserve(input), {
+    allowReplyPrefixes: ["_INBOX_orchestration.", "_INBOX_ai-proxy."],
+  });
   const reservation = await nats.request(
     "rpc.budget.reserve",
     ReserveV1,
@@ -309,12 +357,31 @@ markProcessed })`. `processed` keeps event ids for 45 days. A handler
   );
   ```
 
-  Both ends check with zod. `serve` uses a queue group, so one replica
-  answers. A `DomainError` in the handler goes to the caller with its
-  `code`, `status` and `message` (headers `error-code`, `error-status`,
-  `error-message`). Other errors give `internal` with no detail and go to
-  the log. No answer in time gives `UnavailableError`. `request` and
-  `serve` also exist as functions that take the connection.
+  `serve` first drops each request whose reply subject does not start with
+  one of `allowReplyPrefixes` (ADR 0025): no parse, no handler, no answer.
+  It counts them in `rpc_requests_dropped_total` and writes a debug log.
+  Then both ends check with zod. `serve` uses a queue group, so one
+  replica answers. A `DomainError` in the handler goes to the caller with
+  its `code`, `status` and `message` (headers `error-code`, `error-status`,
+  `error-message`); a `ValidationError` also keeps its `issues`. Other
+  errors give `internal` with no detail and go to the log. No answer in
+  time gives `UnavailableError`. `request` and `serve` also exist as
+  functions that take the connection.
+
+## Known limits
+
+- All appends of one database write one `counters` document, so they wait
+  for each other. Measured: about 110 appends/s. This keeps `position` in
+  commit order.
+- The relay publishes one event at a time and waits for each PubAck.
+  Measured: about 163 events/s.
+- A pod that stops while it keeps a message (MongoDB or NATS down, or an
+  ordered retry) does not ack it. NATS delivers it again later, and that
+  uses a delivery.
+- If a pod stops while the DLQ publish of the last delivery fails, NATS
+  does not deliver the message again. It stays in the stream, and NATS
+  sends a max deliveries advisory.
+- The in-memory store gives `also` a fake session.
 
 ## `./testing`
 
@@ -341,8 +408,9 @@ const nats = await startNats({ config });
   `fakeIds(prefix)` gives lower-case UUID v4 values in order.
   `waitFor(check, timeoutMs, everyMs)` waits until `check` is true. Use it
   in place of fixed sleeps.
-- `startMongo()` starts `mongo:8.0.34` as a replica set with one member.
-  `startNats({ config })` starts `nats:2.15.2` with a config string, so a
+- `startMongo()` starts `mongo:8.0.34` (pinned by digest) as a replica set
+  with one member. `startNats({ config })` starts `nats:2.15.2-alpine`
+  (pinned by digest) with a config string, so a
   test can use real accounts and permissions. The default config is
   JetStream only. Both give `{ url, stop }`.
 - `createStreams(admin, specs)` makes streams (duplicate window 10 min) in

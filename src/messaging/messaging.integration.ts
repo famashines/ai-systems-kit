@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { connect, createServer, type AddressInfo, type Server, type Socket } from "node:net";
+import { createServer as createHttpServer } from "node:http";
+import { setTimeout as sleep } from "node:timers/promises";
 import { after, before, describe, test } from "node:test";
 import { EventEnvelopeV1, TaskSubmittedEventPayloadV1 } from "@famashines/ai-systems-contracts";
 import {
@@ -9,13 +12,14 @@ import {
   type StoredMsg,
 } from "@nats-io/jetstream";
 import { headers } from "@nats-io/transport-node";
-import type { Db, MongoClient } from "mongodb";
+import type { ClientSession, Db, MongoClient } from "mongodb";
 import { pino } from "pino";
 import { z } from "zod";
 import { createEventStore, eventStoreMigration } from "../event-store/index.ts";
 import { DomainError } from "../http/errors.ts";
 import type { CloseHook } from "../http/server.ts";
 import { connectMongo, runMigrations } from "../mongo/index.ts";
+import { startTelemetry } from "../observability/index.ts";
 import { createStreams, startMongo, startNats, waitFor, type Started } from "../testing/index.ts";
 import { connectNats, processedMigration, startConsumer, startRelay, type Nats } from "./index.ts";
 
@@ -52,6 +56,13 @@ accounts {
             ]
           }
           subscribe { allow: ["_INBOX_worker.>"] }
+        }
+      }
+      {
+        user: intruder, password: intruder
+        permissions {
+          publish { allow: ["rpc.test.echo"] }
+          subscribe { allow: ["_INBOX_intruder.>"] }
         }
       }
       {
@@ -150,6 +161,42 @@ const subjectMessages = async (stream: string, subject: string) => {
   return found;
 };
 
+async function tcpGate(host: string, port: number) {
+  const sockets = new Set<Socket>();
+  let server: Server | undefined;
+  const listen = (on: number) =>
+    new Promise<number>((resolve) => {
+      server = createServer((client) => {
+        const upstream = connect(port, host);
+        for (const socket of [client, upstream]) {
+          sockets.add(socket);
+          socket.on("error", () => undefined);
+          socket.on("close", () => {
+            sockets.delete(socket);
+            client.destroy();
+            upstream.destroy();
+          });
+        }
+        client.pipe(upstream).pipe(client);
+      });
+      server.listen(on, "127.0.0.1", () => {
+        resolve((server?.address() as AddressInfo).port);
+      });
+    });
+  const gatePort = await listen(0);
+  const cut = async () => {
+    const closing = new Promise((resolve) => server?.close(resolve));
+    for (const socket of sockets) socket.destroy();
+    await closing;
+  };
+  return {
+    port: gatePort,
+    cut,
+    open: () => listen(gatePort),
+    close: cut,
+  };
+}
+
 const permissive = (input: unknown) => EventEnvelopeV1(z.unknown()).parse(input);
 const fast = [100, 100, 100, 100];
 
@@ -247,6 +294,62 @@ describe("outbox relay", () => {
       .toArray();
     assert.deepEqual(again, after);
     assert.deepEqual(again[0]?.publishedAt, stamp);
+  });
+});
+
+describe("stuck outbox", () => {
+  test("the relay logs errors, counts failures and shows the age of the oldest event", async () => {
+    const telemetry = startTelemetry({ serviceName: "worker", release: "test" });
+    const scrape = createHttpServer(telemetry.metricsHandler);
+    await new Promise<void>((resolve) => scrape.listen(0, "127.0.0.1", resolve));
+    const url = `http://127.0.0.1:${String((scrape.address() as AddressInfo).port)}/metrics`;
+    const lines: string[] = [];
+    const watched = await connectNats({
+      servers: nats.url,
+      user: "worker",
+      pass: "worker",
+      service: "worker",
+      logger: pino({ level: "error" }, { write: (line: string) => lines.push(line) }),
+    });
+    const stuckDb = client.db("stuck");
+    await runMigrations(stuckDb, [eventStoreMigration]);
+    const store = createEventStore(stuckDb, { parse: permissive });
+    const id = randomUUID();
+    await store.append({
+      streamId: `stuck-${id}`,
+      events: [
+        {
+          type: "stuck.Event",
+          schemaVersion: 1,
+          correlationId: id,
+          causationId: id,
+          actor: { kind: "system", id: "test" },
+          payload: {},
+        },
+      ],
+    });
+    const relay = startRelay({ store, nats: watched, streams: ["ORCHESTRATION"] });
+    const value = async (name: string): Promise<number> => {
+      const text = await (await fetch(url)).text();
+      const match = new RegExp(`^${name}(?:\\{[^}]*\\})? (\\S+)$`, "m").exec(text);
+      return Number(match?.[1] ?? 0);
+    };
+    await waitFor(async () => (await value("outbox_publish_failures_total")) >= 1);
+    await waitFor(async () => (await value("outbox_oldest_pending_seconds")) > 0);
+    assert.equal(await relay.ready(), true);
+    await relay.close();
+    await watched.close();
+    await new Promise((resolve) => scrape.close(resolve));
+    await telemetry.shutdown();
+    const failed = lines.map(
+      (line) => JSON.parse(line) as { msg: string; error?: { errorClass: string } },
+    );
+    assert.ok(
+      failed.some(
+        (line) => line.msg === "the outbox relay failed; it tries again" && line.error?.errorClass,
+      ),
+    );
+    assert.equal((await store.pending(10)).length, 1);
   });
 });
 
@@ -368,6 +471,129 @@ describe("durable consumer", () => {
       "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
     );
     assert.equal(dead.header.get("Nats-Msg-Id"), "");
+  });
+
+  test("MongoDB down for longer than all backoffs: nothing is lost, and the effect happens once", async () => {
+    const target = new URL(mongo.url);
+    const gate = await tcpGate(target.hostname, Number(target.port));
+    const proxied = await connectMongo({
+      url: `mongodb://127.0.0.1:${String(gate.port)}/?directConnection=true`,
+      database: "messaging",
+      clientOptions: { serverSelectionTimeoutMS: 500 },
+    });
+    track({ close: () => proxied.close() });
+    const event = envelope();
+    let calls = 0;
+    const consumer = track(
+      startConsumer({
+        nats: worker,
+        db: proxied.db,
+        stream: "ORCHESTRATION",
+        filter: "orchestration.TaskSubmitted",
+        backoffMs: fast,
+        handler: async (received, { session, markProcessed }) => {
+          calls += 1;
+          await session.withTransaction(async () => {
+            await proxied.db
+              .collection<{ _id: string }>("effects")
+              .insertOne({ _id: received.eventId }, { session });
+            await markProcessed(session);
+          });
+        },
+      }),
+    );
+    await waitFor(() => consumer.ready());
+    const before = await deliveries();
+    await gate.cut();
+    await publish(event.type, JSON.stringify(event));
+    await waitFor(async () => (await deliveries()) - before === 1);
+    await sleep(3000);
+    assert.equal((await deliveries()) - before, 1);
+    assert.equal(calls, 0);
+    await gate.open();
+    await waitFor(async () => (await effects().countDocuments({ _id: event.eventId })) === 1);
+    await waitFor(drained);
+    await consumer.close();
+    await gate.close();
+    assert.equal(calls, 1);
+    assert.equal((await deliveries()) - before, 1);
+    const dead = await subjectMessages("DLQ", "dlq.worker.orchestration.TaskSubmitted");
+    assert.equal(
+      dead.some((message) => message.json<EventEnvelopeV1>().eventId === event.eventId),
+      false,
+    );
+  });
+
+  test("a DLQ publish that fails for a while: the message is in the DLQ later", async () => {
+    await manager.streams.delete("DLQ");
+    const event = envelope();
+    let calls = 0;
+    const consumer = await consume(() => {
+      calls += 1;
+      return Promise.reject(new Error("always fails"));
+    });
+    await publish(event.type, JSON.stringify(event));
+    await waitFor(() => calls === 5);
+    await sleep(1500);
+    await createStreams(admin.connection, [{ name: "DLQ", subjects: ["dlq.>"] }]);
+    await waitFor(async () =>
+      (await subjectMessages("DLQ", "dlq.worker.orchestration.TaskSubmitted")).some(
+        (message) => message.json<EventEnvelopeV1>().eventId === event.eventId,
+      ),
+    );
+    await waitFor(drained);
+    await consumer.close();
+    assert.equal(calls, 5);
+  });
+
+  test("ordered: a failed version 1 does not let version 2 pass, also with two consumers", async () => {
+    const second = await connectNats({
+      servers: nats.url,
+      user: "worker",
+      pass: "worker",
+      service: "worker",
+      logger,
+    });
+    track(second);
+    const taskId = randomUUID();
+    const events = [1, 2, 3].map((version) =>
+      envelope({ streamId: `task-${taskId}`, version, correlationId: taskId }),
+    );
+    const seen: number[] = [];
+    const handler = async (
+      received: EventEnvelopeV1,
+      {
+        session,
+        markProcessed,
+      }: { session: ClientSession; markProcessed: (session: ClientSession) => Promise<void> },
+    ): Promise<void> => {
+      seen.push(received.version);
+      if (received.version === 1 && seen.filter((version) => version === 1).length === 1) {
+        throw new Error("version 1 fails once");
+      }
+      await session.withTransaction(() => markProcessed(session));
+    };
+    const consumers = [worker, second].map((nats) =>
+      track(
+        startConsumer({
+          nats,
+          db,
+          stream: "ORCHESTRATION",
+          filter: "orchestration.TaskSubmitted",
+          backoffMs: fast,
+          ordered: true,
+          handler,
+        }),
+      ),
+    );
+    for (const consumer of consumers) await waitFor(() => consumer.ready());
+    for (const event of events) await publish(event.type, JSON.stringify(event));
+    await waitFor(() => seen.length === 4);
+    await waitFor(drained);
+    for (const consumer of consumers) await consumer.close();
+    assert.deepEqual(seen, [1, 1, 2, 3]);
+    const info = await manager.consumers.info("ORCHESTRATION", "worker");
+    assert.equal(info.config.max_ack_pending, 1);
   });
 
   test("a poison message goes to the DLQ at once", async () => {
@@ -503,11 +729,31 @@ describe("ADR 0023 grants", () => {
     });
     const Input = z.object({ text: z.string() });
     const Output = z.object({ text: z.string(), length: z.int() });
-    const subscription = echo.serve("rpc.test.echo", Input, Output, ({ text }) => ({
-      text,
-      length: text.length,
-    }));
+    let calls = 0;
+    const subscription = echo.serve(
+      "rpc.test.echo",
+      Input,
+      Output,
+      ({ text }) => {
+        calls += 1;
+        return { text, length: text.length };
+      },
+      { allowReplyPrefixes: ["_INBOX_worker."] },
+    );
     await echo.connection.flush();
+    const intruder = await connectNats({
+      servers: nats.url,
+      user: "intruder",
+      pass: "intruder",
+      service: "intruder",
+      logger,
+    });
+    await assert.rejects(
+      intruder.request("rpc.test.echo", Input, Output, { text: "flood" }, 500),
+      /did not answer/,
+    );
+    await intruder.close();
+    assert.equal(calls, 0);
     assert.deepEqual(await worker.request("rpc.test.echo", Input, Output, { text: "hello" }), {
       text: "hello",
       length: 5,
@@ -517,6 +763,7 @@ describe("ADR 0023 grants", () => {
       worker.request("rpc.test.missing", Input, Output, { text: "x" }, 500),
       /did not answer/,
     );
+    assert.equal(calls, 1);
     subscription.unsubscribe();
     await echo.close();
   });

@@ -13,6 +13,13 @@
 - `./testing`: in-memory event store, `fakeClock`, `fakeIds`, `waitFor`,
   `startMongo`, `startNats` and `createStreams`.
 - `./http`: `ErrorCode` comes from `@famashines/ai-systems-contracts`.
+- Review fixes: MongoDB or NATS outages and DLQ publish failures do not use
+  deliveries (the consumer keeps the message and tries again); the option
+  `ordered`; `serve` drops replies that are not in `allowReplyPrefixes`
+  (ADR 0025); events above 900 KiB give `payload_too_large`; relay metrics
+  `outbox_oldest_pending_seconds` and `outbox_publish_failures_total`;
+  logs and DLQ headers use `describeError`; `mongodb` is a peer dependency;
+  test images are pinned by digest.
 
 - `./http`: before hooks run before routing. `DomainError` has `headers`.
   New codes `method_not_allowed`, `payload_too_large` and
