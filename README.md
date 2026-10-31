@@ -13,13 +13,14 @@ Reasons and the dependency list: ADR 0003, 0004, 0017 and 0018 in
 ├── ./mongo          MongoDB connect with retry, ping readiness, migrations
 ├── ./event-store    events on MongoDB: append with expected version, command ids, upcasters, replay
 ├── ./messaging      NATS connect, outbox relay, durable consumer with DLQ, rpc request and serve
+├── ./nats           NATS connect, ordered consumers, gauges; no mongodb
 └── ./testing        in-memory event store, fake clock and ids, waitFor, Testcontainers helpers
 ```
 
 ## Install
 
 ```sh
-npm install github:famashines/ai-systems-kit#v0.2.0
+npm install github:famashines/ai-systems-kit#v0.3.0
 ```
 
 npm builds `dist/` with the `prepare` script on install. npm 11 asks for
@@ -44,8 +45,9 @@ The kit installs `@famashines/ai-systems-contracts` (v0.1.0),
 service installs `mongodb` (7.8.0) and `zod` (4.6.7) itself, so that it and
 the kit use one copy (two copies break the `Db` and `ClientSession` types
 and `instanceof MongoServerError`). `mongodb` is an optional peer
-dependency: a service with no database (the gateways) does not install it
-and does not import `./mongo`, `./event-store` or `./messaging`.
+dependency: a service with no database (the gateways) does not install it,
+does not import `./mongo`, `./event-store` or `./messaging`, and uses
+`./nats` for NATS.
 `testcontainers` is an optional peer dependency: install it as a dev
 dependency when you use `startMongo` or `startNats`.
 
@@ -331,12 +333,8 @@ const consumer = startConsumer({
 });
 ```
 
-- `connectNats({ servers, user, pass, service, logger })` gives
-  `{ connection, service, logger, ready, close, request, serve }`. The inbox
-  prefix is `_INBOX_<service>` (ADR 0023). It waits for the first
-  connection, so a service starts its HTTP server only after NATS answers.
-  It reconnects with no limit. `ready` sends a ping. `close` drains the
-  connection.
+- `connectNats({ servers, user, pass, service, logger })` gives the
+  `./nats` connection (see there) with `logger`, `request` and `serve`.
 - `startRelay({ store, nats, streams, pollMs = 1000, batch = 100 })` gives
   `{ ready, close }`. It wakes on a change stream of `events` and also
   polls each `pollMs`. It publishes the events with `publishedAt: null` in
@@ -454,6 +452,44 @@ markProcessed })`. `markProcessed` throws if the session is not in a
   errors give `internal` with no detail and go to the log. No answer in
   time gives `UnavailableError`. `request` and `serve` also exist as
   functions that take the connection.
+
+## `./nats`
+
+NATS only. Nothing in its import graph imports `mongodb`
+(`src/nats/imports.test.ts` loads it with `mongodb` blocked).
+
+```ts
+import { connectNats, observeGauge, orderedStream } from "@famashines/ai-systems-kit/nats";
+
+const nats = await connectNats({ servers, user, pass, service: "socket-gateway" });
+const views = await orderedStream(nats, "VIEWS");
+const { last } = await views.head();
+const stop = await views.consume({
+  subjects: ["view.task.>"],
+  startSeq: last + 1,
+  onMessage: ({ seq, subject, data }) => send(seq, subject, data),
+  onError: (error) => end(error),
+  onGone: () => end("gone"),
+});
+const removeGauge = observeGauge("socket-gateway", "ws_connections", "Open sockets", () => open);
+```
+
+- `connectNats({ servers, user, pass, service })` gives
+  `{ connection, service, ready, close }`. The inbox prefix is
+  `_INBOX_<service>` (ADR 0023). It waits for the first connection, so a
+  service starts its HTTP server only after NATS answers. It reconnects
+  with no limit. `ready` sends a ping. `close` drains the connection.
+- `orderedStream(nats, stream)` gives `{ head, consume }`. `head()` reads
+  the stream info: `{ first, last }`. `consume(options)` makes a JetStream
+  ordered consumer (ephemeral, no acks) with `filter_subjects` and
+  `opt_start_seq`, and calls `onMessage` in order. `onGone` is called when
+  the consumer or the stream is deleted, `onError` when the messages stop
+  for another reason. The stop function closes the messages and deletes
+  the consumer; it throws if the delete fails.
+- `observeGauge(meter, name, description, read, attributes?)` adds an
+  OpenTelemetry observable gauge that calls `read` at each scrape. It
+  gives a function that removes the callback. After that, the exporter
+  keeps the last value.
 
 ## Known limits
 

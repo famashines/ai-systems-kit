@@ -1,23 +1,19 @@
-import { connect, type NatsConnection, type Subscription } from "@nats-io/transport-node";
+import type { Subscription } from "@nats-io/transport-node";
 import type { Logger } from "pino";
 import type { z } from "zod";
-import type { CloseHook, ReadinessCheck } from "../http/server.ts";
+import {
+  connectNats as connectCore,
+  type Nats as CoreNats,
+  type NatsOptions as CoreOptions,
+} from "../nats/connect.io.ts";
 import { request, serve, type ServeOptions } from "./rpc.ts";
 
-export interface NatsOptions {
-  servers: string | string[];
-  user?: string;
-  pass?: string;
-  service: string;
+export interface NatsOptions extends CoreOptions {
   logger: Logger;
 }
 
-export interface Nats {
-  connection: NatsConnection;
-  service: string;
+export interface Nats extends CoreNats {
   logger: Logger;
-  ready: ReadinessCheck;
-  close: CloseHook;
   request<I extends z.ZodType, O extends z.ZodType>(
     subject: string,
     schemaIn: I,
@@ -35,26 +31,12 @@ export interface Nats {
 }
 
 export async function connectNats(options: NatsOptions): Promise<Nats> {
-  const { service, logger } = options;
-  const connection = await connect({
-    servers: options.servers,
-    ...(options.user === undefined ? {} : { user: options.user }),
-    ...(options.pass === undefined ? {} : { pass: options.pass }),
-    name: service,
-    inboxPrefix: `_INBOX_${service}`,
-    maxReconnectAttempts: -1,
-    waitOnFirstConnect: true,
-  });
+  const { logger, ...core } = options;
+  const nats = await connectCore(core);
+  const { connection } = nats;
   return {
-    connection,
-    service,
+    ...nats,
     logger,
-    ready: () =>
-      connection.rtt().then(
-        () => true,
-        () => false,
-      ),
-    close: () => connection.drain(),
     request: (subject, schemaIn, schemaOut, payload, timeoutMs) =>
       request(connection, subject, schemaIn, schemaOut, payload, timeoutMs),
     serve: (subject, schemaIn, schemaOut, handler, serveOptions) =>

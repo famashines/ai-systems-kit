@@ -1,7 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
+- `./nats`: `connectNats` with the service inbox prefix, `orderedStream`
+  (stream head and JetStream ordered consumers, moved from socket-gateway)
+  and `observeGauge`. No module in its import graph imports `mongodb`; a
+  test loads it with `mongodb` blocked.
+- `./messaging`: `connectNats` uses the `./nats` connection and adds
+  `logger`, `request` and `serve`; its API does not change. The relay and
+  consumer gauges use `observeGauge`.
 - Local system: `compose.yaml` with MongoDB, NATS (gitops grants and
   streams), a local OIDC issuer and the four M1 services, `npm run
 dev:up`, `dev:e2e`, `dev:down` and `dev:sync`, and the CI job `e2e`.

@@ -1,8 +1,9 @@
 import { jetstream, jetstreamManager } from "@nats-io/jetstream";
 import { headers } from "@nats-io/transport-node";
-import { metrics, type ObservableResult } from "@opentelemetry/api";
+import { metrics } from "@opentelemetry/api";
 import type { MongoEventStore } from "../event-store/store.io.ts";
 import type { CloseHook, ReadinessCheck } from "../http/server.ts";
+import { observeGauge } from "../nats/gauge.ts";
 import type { Nats } from "./connect.io.ts";
 import { backoff, backoffCapMs, describeError } from "./failures.ts";
 import { pauser } from "./pause.ts";
@@ -32,14 +33,13 @@ export function startRelay(options: RelayOptions): Relay {
   const failed = meter.createCounter("outbox_publish_failures", {
     description: "Outbox relay batches that failed",
   });
-  const oldest = meter.createObservableGauge("outbox_oldest_pending_seconds", {
-    description: "Age of the oldest event that the relay did not publish yet",
-  });
   let oldestAt: number | undefined;
-  const observe = (result: ObservableResult): void => {
-    result.observe(oldestAt === undefined ? 0 : (Date.now() - oldestAt) / 1000);
-  };
-  oldest.addCallback(observe);
+  const removeGauge = observeGauge(
+    "ai-systems-kit",
+    "outbox_oldest_pending_seconds",
+    "Age of the oldest event that the relay did not publish yet",
+    () => (oldestAt === undefined ? 0 : (Date.now() - oldestAt) / 1000),
+  );
   const changes = store.watch();
   changes.on("change", () => {
     timing.wake();
@@ -107,7 +107,7 @@ export function startRelay(options: RelayOptions): Relay {
     },
     close: async () => {
       timing.stop();
-      oldest.removeCallback(observe);
+      removeGauge();
       await changes.close();
       await loop;
     },
