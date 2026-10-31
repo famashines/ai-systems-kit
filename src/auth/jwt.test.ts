@@ -106,11 +106,12 @@ const fails = async (work: Promise<unknown>, status: number, error?: string) => 
 describe("createJwtVerifier", () => {
   test("a valid token gives the subject", async () => {
     const verify = fresh();
-    const token = await sign();
+    const exp = now() + 300;
+    const token = await sign({ exp });
     const subject = await verify(token);
     assert.equal(subject.sub, "owner-1");
     assert.deepEqual(subject.roles, ["owner", "default-roles-ai-systems"]);
-    assert.equal(subject.exp, now() + 300);
+    assert.equal(subject.exp, exp);
     await verify(token);
     assert.equal(fetches, 1);
   });

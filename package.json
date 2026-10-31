@@ -1,6 +1,6 @@
 {
   "name": "@famashines/ai-systems-kit",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Shared server code for ai-systems services: http, auth, config, observability, mongo, event store, messaging, nats, testing",
   "license": "UNLICENSED",
