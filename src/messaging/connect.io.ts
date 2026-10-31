@@ -2,7 +2,7 @@ import { connect, type NatsConnection, type Subscription } from "@nats-io/transp
 import type { Logger } from "pino";
 import type { z } from "zod";
 import type { CloseHook, ReadinessCheck } from "../http/server.ts";
-import { request, serve } from "./rpc.ts";
+import { request, serve, type ServeOptions } from "./rpc.ts";
 
 export interface NatsOptions {
   servers: string | string[];
@@ -30,6 +30,7 @@ export interface Nats {
     schemaIn: I,
     schemaOut: O,
     handler: (input: z.output<I>) => z.input<O> | Promise<z.input<O>>,
+    options: ServeOptions,
   ): Subscription;
 }
 
@@ -56,7 +57,7 @@ export async function connectNats(options: NatsOptions): Promise<Nats> {
     close: () => connection.drain(),
     request: (subject, schemaIn, schemaOut, payload, timeoutMs) =>
       request(connection, subject, schemaIn, schemaOut, payload, timeoutMs),
-    serve: (subject, schemaIn, schemaOut, handler) =>
-      serve(connection, logger, subject, schemaIn, schemaOut, handler),
+    serve: (subject, schemaIn, schemaOut, handler, serveOptions) =>
+      serve(connection, logger, subject, schemaIn, schemaOut, handler, serveOptions),
   };
 }

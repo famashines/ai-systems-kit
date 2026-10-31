@@ -1,9 +1,18 @@
 import { ErrorCode } from "@famashines/ai-systems-contracts";
 import { headers, type Msg, type NatsConnection, type Subscription } from "@nats-io/transport-node";
+import { metrics } from "@opentelemetry/api";
 import type { Logger } from "pino";
-import type { z } from "zod";
+import { z } from "zod";
 import { DomainError, UnavailableError, ValidationError, type Issue } from "../http/errors.ts";
-import { headerText } from "./failures.ts";
+import { describeError, headerText } from "./failures.ts";
+
+export interface ServeOptions {
+  allowReplyPrefixes: readonly string[];
+}
+
+const RemoteIssues = z.object({
+  issues: z.array(z.object({ path: z.string(), code: z.string(), message: z.string() })),
+});
 
 const issuesOf = (error: z.ZodError): Issue[] =>
   error.issues.map((issue) => ({
@@ -38,6 +47,13 @@ export async function request<I extends z.ZodType, O extends z.ZodType>(
     throw new UnavailableError(`${subject} did not answer`);
   }
   const code = reply.headers?.get("error-code");
+  if (code === "validation_failed") {
+    const remote = RemoteIssues.safeParse(parseJson(reply.string()));
+    throw new ValidationError(
+      reply.headers?.get("error-message") || "The rpc request is not valid",
+      remote.success ? remote.data.issues : [],
+    );
+  }
   if (code) {
     throw new DomainError(
       ErrorCode.catch("internal").parse(code),
@@ -58,8 +74,19 @@ export function serve<I extends z.ZodType, O extends z.ZodType>(
   schemaIn: I,
   schemaOut: O,
   handler: (input: z.output<I>) => z.input<O> | Promise<z.input<O>>,
+  options: ServeOptions,
 ): Subscription {
+  const dropped = metrics.getMeter("ai-systems-kit").createCounter("rpc_requests_dropped", {
+    description: "rpc requests from a reply subject that is not allowed",
+  });
+  const allowed = (reply: string | undefined): boolean =>
+    reply !== undefined && options.allowReplyPrefixes.some((prefix) => reply.startsWith(prefix));
   async function answer(message: Msg): Promise<void> {
+    if (!allowed(message.reply)) {
+      dropped.add(1, { subject });
+      logger.debug({ subject }, "rpc request dropped: the reply subject is not allowed");
+      return;
+    }
     try {
       const input = schemaIn.safeParse(parseJson(message.string()));
       if (!input.success) {
@@ -71,13 +98,16 @@ export function serve<I extends z.ZodType, O extends z.ZodType>(
       message.respond(JSON.stringify(output.data));
     } catch (error) {
       const known = error instanceof DomainError;
-      if (!known) logger.error({ err: error, subject }, "rpc handler failed");
+      if (!known) logger.error({ error: describeError(error), subject }, "rpc handler failed");
       const reply = known ? error : new DomainError("internal", 500, "The rpc handler failed");
       const meta = headers();
       meta.set("error-code", reply.code);
       meta.set("error-status", String(reply.status));
       meta.set("error-message", headerText(reply.message));
-      message.respond("", { headers: meta });
+      message.respond(
+        error instanceof ValidationError ? JSON.stringify({ issues: error.issues }) : "",
+        { headers: meta },
+      );
     }
   }
   return connection.subscribe(subject, {

@@ -7,6 +7,14 @@ export {
   type EventHandler,
   type HandlerContext,
 } from "./consumer.io.ts";
-export { backoff, consumerBackoffMs, dlqHeaders, onFailure, type Next } from "./failures.ts";
+export {
+  backoff,
+  consumerBackoffMs,
+  describeError,
+  dlqHeaders,
+  isInfrastructure,
+  onFailure,
+  type Next,
+} from "./failures.ts";
 export { startRelay, type Relay, type RelayOptions } from "./relay.io.ts";
-export { request, serve } from "./rpc.ts";
+export { request, serve, type ServeOptions } from "./rpc.ts";
