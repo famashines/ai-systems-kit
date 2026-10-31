@@ -36,11 +36,16 @@ export type Match =
 const segments = (path: string): string[] => path.split("/").filter((part) => part !== "");
 
 const decode = (part: string): string => {
+  let value: string;
   try {
-    return decodeURIComponent(part);
+    value = decodeURIComponent(part);
   } catch {
     throw new ValidationError("The path is not valid");
   }
+  if (value === "." || value === ".." || /[/\\]/.test(value)) {
+    throw new ValidationError("The path is not valid");
+  }
+  return value;
 };
 
 export function createRouter(routes: readonly Route[]): (method: string, path: string) => Match {

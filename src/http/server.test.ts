@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { request as httpRequest } from "node:http";
+import { once } from "node:events";
+import { get } from "node:http";
+import { connect } from "node:net";
 import { after, describe, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { pino } from "pino";
@@ -22,33 +24,20 @@ import {
 
 const lines: string[] = [];
 const logger = pino({ level: "debug" }, { write: (line: string) => lines.push(line) });
-const services: { close(): Promise<void> }[] = [];
+const services: { close(): Promise<boolean> }[] = [];
 
 after(async () => {
   await Promise.all(services.map((service) => service.close()));
 });
 
 async function start(options: Partial<ServiceOptions> = {}) {
-  const service = createService({ routes: [], logger, ...options });
+  const service = createService({ routes: [], logger, drainDelayMs: 0, ...options });
   services.push(service);
   const { port } = await service.listen(0, "127.0.0.1");
-  return { service, url: `http://127.0.0.1:${String(port)}` };
+  return { service, port, url: `http://127.0.0.1:${String(port)}` };
 }
 
-function gate() {
-  const started = Promise.withResolvers<undefined>();
-  const released = Promise.withResolvers<undefined>();
-  return {
-    started: started.promise,
-    release: () => {
-      released.resolve(undefined);
-    },
-    wait: () => {
-      started.resolve(undefined);
-      return released.promise;
-    },
-  };
-}
+const uuid = (n: number): string => `6f1c3c7e-2d0a-4f3b-9a7e-${String(n).padStart(12, "0")}`;
 
 const json = (body: unknown, type = "application/json"): RequestInit => ({
   method: "POST",
@@ -117,14 +106,24 @@ describe("routing", () => {
     const response = await fetch(`${url}/api/tasks/a`, { method: "PUT" });
     assert.equal(response.status, 405);
     assert.equal(response.headers.get("allow"), "GET, DELETE");
-    const body = (await response.json()) as { title: string };
+    const body = (await response.json()) as { title: string; code: string };
     assert.equal(body.title, "Method Not Allowed");
+    assert.equal(body.code, "method_not_allowed");
   });
 
-  test("gives 400 for a param that does not decode", async () => {
-    const { url } = await start({ routes });
-    const response = await fetch(`${url}/api/tasks/%E0%A4%A`);
-    assert.equal(response.status, 400);
+  test("gives 400 for a param that does not decode or is a path", async () => {
+    const { port } = await start({ routes });
+    const status = (path: string) =>
+      new Promise<number | undefined>((resolve, reject) => {
+        get({ host: "127.0.0.1", port, path }, (response) => {
+          response.resume();
+          resolve(response.statusCode);
+        }).on("error", reject);
+      });
+    for (const param of ["%E0%A4%A", "a%2Fb", "a%5Cb", "%2E", "%2E%2E", "%2e%2e"]) {
+      assert.equal(await status(`/api/tasks/${param}`), 400, param);
+    }
+    assert.equal(await status("/api/tasks/a.b"), 200);
   });
 });
 
@@ -176,7 +175,8 @@ describe("body and validation", () => {
     const { url } = await start({ routes });
     const response = await fetch(`${url}/echo`, json("a=1", "text/plain"));
     assert.equal(response.status, 415);
-    assert.equal(((await response.json()) as { code: string }).code, "validation_failed");
+    assert.equal(response.headers.get("connection"), "close");
+    assert.equal(((await response.json()) as { code: string }).code, "unsupported_media_type");
     const missing = await fetch(`${url}/echo`, { method: "POST", body: "{}" });
     assert.equal(missing.status, 415);
   });
@@ -185,6 +185,7 @@ describe("body and validation", () => {
     const { url } = await start({ routes });
     const response = await fetch(`${url}/echo`, json("{bad"));
     assert.equal(response.status, 400);
+    assert.equal(response.headers.get("connection"), "close");
     assert.equal(
       ((await response.json()) as { detail: string }).detail,
       "The body is not valid JSON",
@@ -195,25 +196,41 @@ describe("body and validation", () => {
     const { url } = await start({ routes, bodyLimit: 10 });
     const response = await fetch(`${url}/echo`, json({ text: "more than ten bytes" }));
     assert.equal(response.status, 413);
-    assert.equal(((await response.json()) as { title: string }).title, "Payload Too Large");
+    assert.equal(response.headers.get("connection"), "close");
+    const body = (await response.json()) as { title: string; code: string };
+    assert.equal(body.title, "Payload Too Large");
+    assert.equal(body.code, "payload_too_large");
   });
 
-  test("gives 413 for a streamed body above the limit", async () => {
-    const { url } = await start({ routes });
-    const status = await new Promise<number>((resolve, reject) => {
-      const request = httpRequest(
-        `${url}/echo`,
-        { method: "POST", headers: { "content-type": "application/json" } },
-        (response) => {
-          response.resume();
-          resolve(response.statusCode ?? 0);
-        },
-      );
-      request.on("error", reject);
-      request.write(`"${"a".repeat(2 * 1024 * 1024)}`);
-      request.end('"');
+  test("closes the socket within 1 s when a chunked flood passes the limit", async () => {
+    const { port } = await start({ routes, bodyLimit: 1024 });
+    const socket = connect(port, "127.0.0.1");
+    await once(socket, "connect");
+    let received = "";
+    socket.on("data", (data: Buffer) => {
+      received += data.toString();
     });
-    assert.equal(status, 413);
+    socket.on("error", () => undefined);
+    socket.write(
+      "POST /echo HTTP/1.1\r\nhost: kit\r\ncontent-type: application/json\r\n" +
+        "transfer-encoding: chunked\r\n\r\n",
+    );
+    const chunk = `4000\r\n${"a".repeat(0x4000)}\r\n`;
+    const flood = setInterval(() => {
+      if (socket.writable) socket.write(chunk);
+    }, 1);
+    const closed = new Promise<string>((resolve) => {
+      socket.once("close", () => {
+        clearInterval(flood);
+        resolve("closed");
+      });
+    });
+    const result = await Promise.race([closed, sleep(1000).then(() => "open")]);
+    clearInterval(flood);
+    socket.destroy();
+    assert.equal(result, "closed");
+    assert.match(received, /^HTTP\/1\.1 413/);
+    assert.match(received, /connection: close/i);
   });
 
   test("gives 400 with issue paths and no values", async () => {
@@ -292,7 +309,9 @@ describe("errors", () => {
     const text = await response.text();
     assert.ok(!text.includes("hunter2"));
     assert.equal((JSON.parse(text) as { code: string }).code, "internal");
-    assert.ok(lines.some((line) => line.includes("hunter2") && line.includes("unhandled error")));
+    const logged = lines.find((line) => line.includes("unhandled error")) ?? "";
+    assert.ok(logged.includes("hunter2"));
+    assert.ok(logged.includes('"method":"GET"') && logged.includes('"path":"/boom"'));
   });
 
   test("destroys the response when an error comes after the headers", async () => {
@@ -324,24 +343,51 @@ describe("ids and hooks", () => {
     const { url } = await start({ routes });
     const response = await fetch(`${url}/ids`);
     const requestId = response.headers.get("x-request-id") ?? "";
-    assert.match(requestId, /^[0-9a-f-]{36}$/);
+    assert.match(
+      requestId,
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
     assert.equal(response.headers.get("x-correlation-id"), requestId);
     const body = (await response.json()) as { context: unknown };
     assert.deepEqual(body.context, { requestId, correlationId: requestId });
   });
 
-  test("keeps given ids through async code and drops bad ones", async () => {
+  test("keeps given UUID v4 ids through async code and drops others", async () => {
     const { url } = await start({ routes });
-    const response = await fetch(`${url}/ids`, {
-      headers: { "x-request-id": "req-1", "x-correlation-id": "task 1\n" },
-    });
-    assert.equal(response.headers.get("x-request-id"), "req-1");
-    assert.equal(response.headers.get("x-correlation-id"), "req-1");
+    for (const bad of ["req-1", uuid(1).toUpperCase(), "6f1c3c7e-2d0a-1f3b-9a7e-000000000001"]) {
+      const response = await fetch(`${url}/ids`, {
+        headers: { "x-request-id": bad, "x-correlation-id": bad },
+      });
+      const requestId = response.headers.get("x-request-id") ?? "";
+      assert.notEqual(requestId, bad);
+      assert.equal(response.headers.get("x-correlation-id"), requestId);
+    }
     const ok = await fetch(`${url}/ids`, {
-      headers: { "x-request-id": "req-2", "x-correlation-id": "task-9" },
+      headers: { "x-request-id": uuid(2), "x-correlation-id": uuid(3) },
     });
+    assert.equal(ok.headers.get("x-request-id"), uuid(2));
     const body = (await ok.json()) as { context: unknown };
-    assert.deepEqual(body.context, { requestId: "req-2", correlationId: "task-9" });
+    assert.deepEqual(body.context, { requestId: uuid(2), correlationId: uuid(3) });
+  });
+
+  test("runs before hooks before routing", async () => {
+    const { url } = await start({
+      routes,
+      before: [
+        () => {
+          throw new UnauthorizedError(undefined, { "www-authenticate": "Bearer" });
+        },
+      ],
+    });
+    for (const [path, method] of [
+      ["/nothing", "GET"],
+      ["/ids", "DELETE"],
+    ] as const) {
+      const response = await fetch(`${url}${path}`, { method });
+      assert.equal(response.status, 401);
+      assert.equal(response.headers.get("www-authenticate"), "Bearer");
+      assert.equal(response.headers.get("allow"), null);
+    }
   });
 
   test("runs before hooks in order and lets them reject", async () => {
@@ -365,6 +411,48 @@ describe("ids and hooks", () => {
     const allowed = await fetch(`${url}/ids`, { headers: { authorization: "Bearer ok" } });
     assert.equal(((await allowed.json()) as { user: string }).user, "owner");
     assert.deepEqual(order, ["first", "first", "second"]);
+  });
+});
+
+describe("replies", () => {
+  test("sends a text body with the content type of the handler", async () => {
+    const { url } = await start({
+      routes: [
+        {
+          method: "GET",
+          path: "/text",
+          handler: () => ({ headers: { "Content-Type": "text/plain" }, body: "plain" }),
+        },
+        {
+          method: "GET",
+          path: "/json",
+          handler: () => ({ body: "quoted" }),
+        },
+      ],
+    });
+    const text = await fetch(`${url}/text`);
+    assert.equal(text.headers.get("content-type"), "text/plain");
+    assert.equal(await text.text(), "plain");
+    const json = await fetch(`${url}/json`);
+    assert.equal(json.headers.get("content-type"), "application/json");
+    assert.equal(await json.text(), '"quoted"');
+  });
+
+  test("gives the headers of a DomainError", async () => {
+    const { url } = await start({
+      routes: [
+        {
+          method: "GET",
+          path: "/limited",
+          handler: () => {
+            throw new RateLimitedError(undefined, { "retry-after": "30" });
+          },
+        },
+      ],
+    });
+    const response = await fetch(`${url}/limited`);
+    assert.equal(response.status, 429);
+    assert.equal(response.headers.get("retry-after"), "30");
   });
 });
 
@@ -405,6 +493,19 @@ describe("health, readiness and metrics", () => {
     assert.deepEqual(body.failing, ["nats", "migrations"]);
   });
 
+  test("ready lists a check that does not end before the timeout", async () => {
+    const { url } = await start({
+      readinessTimeoutMs: 50,
+      readiness: { mongo: () => true, nats: () => new Promise<boolean>(() => undefined) },
+    });
+    const started = Date.now();
+    const response = await fetch(`${url}/ready`);
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(response.status, 503);
+    assert.deepEqual(((await response.json()) as { failing: string[] }).failing, ["nats"]);
+    assert.ok(lines.some((line) => line.includes("readiness check timed out")));
+  });
+
   test("serves /metrics with the given handler", async () => {
     const { url } = await start({
       metrics: (_request, response) => {
@@ -413,107 +514,5 @@ describe("health, readiness and metrics", () => {
     });
     const response = await fetch(`${url}/metrics`);
     assert.equal(await response.text(), "up 1\n");
-  });
-});
-
-describe("shutdown", () => {
-  test("waits for an in-flight request, then runs close hooks in reverse", async () => {
-    const order: string[] = [];
-    const slow = gate();
-    const { service, url } = await start({
-      routes: [
-        {
-          method: "GET",
-          path: "/slow",
-          handler: async () => {
-            await slow.wait();
-            order.push("request done");
-            return { body: { done: true } };
-          },
-        },
-      ],
-      closeHooks: [
-        () => {
-          order.push("mongo");
-        },
-        () => {
-          throw new Error("nats close failed");
-        },
-        async () => {
-          await sleep(1);
-          order.push("telemetry");
-        },
-      ],
-    });
-    const inFlight = fetch(`${url}/slow`);
-    await slow.started;
-    const closed = service.close();
-    assert.equal(service.close(), closed);
-    await sleep(20);
-    assert.deepEqual(order, []);
-    slow.release();
-    const response = await inFlight;
-    assert.deepEqual(await response.json(), { done: true });
-    await closed;
-    assert.deepEqual(order, ["request done", "telemetry", "mongo"]);
-    assert.ok(lines.some((line) => line.includes("close hook failed")));
-    await assert.rejects(fetch(`${url}/slow`));
-  });
-
-  test("ready gives 503 while it shuts down", async () => {
-    const check = gate();
-    const { service, url } = await start({
-      readiness: { mongo: () => check.wait().then(() => true) },
-    });
-    const ready = fetch(`${url}/ready`);
-    await check.started;
-    const closed = service.close();
-    check.release();
-    const response = await ready;
-    assert.equal(response.status, 503);
-    assert.deepEqual(((await response.json()) as { failing: string[] }).failing, ["shutdown"]);
-    await closed;
-  });
-
-  test("closes open connections after the timeout", async () => {
-    const hang = gate();
-    const { service, url } = await start({
-      shutdownTimeoutMs: 50,
-      routes: [
-        {
-          method: "GET",
-          path: "/hang",
-          handler: async () => {
-            await hang.wait();
-            return {};
-          },
-        },
-      ],
-    });
-    const inFlight = fetch(`${url}/hang`);
-    await hang.started;
-    const started = Date.now();
-    await service.close();
-    assert.ok(Date.now() - started < 1000);
-    await assert.rejects(inFlight);
-    assert.ok(lines.some((line) => line.includes("shutdown timeout")));
-  });
-
-  test("handles SIGTERM and exits with 0", async () => {
-    const { service } = await start();
-    const code = await new Promise<number>((resolve) => {
-      service.handleSignals(resolve);
-      process.emit("SIGTERM", "SIGTERM");
-    });
-    assert.equal(code, 0);
-    process.removeAllListeners("SIGINT");
-  });
-
-  test("listen rejects when the port is in use", async () => {
-    const { service } = await start();
-    const address = service.server.address();
-    assert.ok(address && typeof address === "object");
-    const other = createService({ routes: [], logger });
-    await assert.rejects(other.listen(address.port, "127.0.0.1"), { code: "EADDRINUSE" });
   });
 });

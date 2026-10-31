@@ -7,6 +7,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import type { AddressInfo } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Logger } from "pino";
 import type { z } from "zod";
 import { runWithContext } from "./context.ts";
@@ -26,28 +27,37 @@ export interface ServiceOptions {
   closeHooks?: readonly CloseHook[];
   metrics?: MetricsHandler;
   bodyLimit?: number;
+  readinessTimeoutMs?: number;
+  drainDelayMs?: number;
   shutdownTimeoutMs?: number;
 }
 
 export interface Service {
   server: Server;
   listen(port: number, host?: string): Promise<AddressInfo>;
-  close(): Promise<void>;
+  close(): Promise<boolean>;
   handleSignals(exit?: (code: number) => void): void;
 }
 
-const idPattern = /^[\w.:-]{1,128}$/;
+const uuidV4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 const pickId = (value: string | string[] | undefined): string | undefined =>
-  typeof value === "string" && idPattern.test(value) ? value : undefined;
+  typeof value === "string" && uuidV4.test(value) ? value : undefined;
+
+const closeConnection = { connection: "close" };
 
 const tooLarge = (): DomainError =>
-  new DomainError("validation_failed", 413, "The body is larger than the limit");
+  new DomainError("payload_too_large", 413, "The body is larger than the limit", closeConnection);
 
 async function readJson(raw: IncomingMessage, limit: number): Promise<unknown> {
   const type = raw.headers["content-type"]?.split(";")[0]?.trim().toLowerCase() ?? "";
   if (type !== "application/json" && !type.endsWith("+json")) {
-    throw new DomainError("validation_failed", 415, "The content type must be application/json");
+    throw new DomainError(
+      "unsupported_media_type",
+      415,
+      "The content type must be application/json",
+      closeConnection,
+    );
   }
   if (Number(raw.headers["content-length"]) > limit) throw tooLarge();
   const text = await new Promise<string>((resolve, reject) => {
@@ -57,7 +67,7 @@ async function readJson(raw: IncomingMessage, limit: number): Promise<unknown> {
       size += chunk.length;
       if (size > limit) {
         raw.off("data", onData);
-        raw.resume();
+        raw.pause();
         reject(tooLarge());
         return;
       }
@@ -72,7 +82,7 @@ async function readJson(raw: IncomingMessage, limit: number): Promise<unknown> {
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    throw new ValidationError("The body is not valid JSON");
+    throw new ValidationError("The body is not valid JSON", [], closeConnection);
   }
 }
 
@@ -118,21 +128,25 @@ export async function validate<S extends Schemas>(
   return result as Validated<S>;
 }
 
-function send(
-  response: ServerResponse,
-  status: number,
-  body: unknown,
-  type = "application/json",
-): void {
+const isJson = (type: string): boolean => /^application\/([\w.-]+\+)?json\b/i.test(type);
+
+function send(response: ServerResponse, status: number, body: unknown, type: string): void {
   if (body === undefined) {
     response.writeHead(status).end();
     return;
   }
-  const text = JSON.stringify(body);
+  const payload =
+    !isJson(type) && (typeof body === "string" || body instanceof Uint8Array)
+      ? body
+      : JSON.stringify(body);
   response
-    .writeHead(status, { "content-type": type, "content-length": Buffer.byteLength(text) })
-    .end(text);
+    .writeHead(status, { "content-type": type, "content-length": Buffer.byteLength(payload) })
+    .end(payload);
 }
+
+const sendJson = (response: ServerResponse, status: number, body: unknown): void => {
+  send(response, status, body, "application/json");
+};
 
 function sendProblem(
   response: ServerResponse,
@@ -158,29 +172,49 @@ export function createService(options: ServiceOptions): Service {
     closeHooks = [],
     metrics,
     bodyLimit = 1024 * 1024,
-    shutdownTimeoutMs = 15_000,
+    readinessTimeoutMs = 2000,
+    drainDelayMs = 5000,
+    shutdownTimeoutMs = 19_000,
   } = options;
   const route = createRouter(options.routes);
-  let closing: Promise<void> | undefined;
+  const active = new Set<ServerResponse>();
+  let state: "running" | "draining" | "closing" = "running";
+  let closing: Promise<boolean> | undefined;
+  let signalsHandled = false;
+
+  async function runCheck(name: string, check: ReadinessCheck): Promise<string | undefined> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => {
+        resolve("timeout");
+      }, readinessTimeoutMs);
+    });
+    try {
+      const result = await Promise.race([Promise.resolve().then(check), timeout]);
+      if (result === "timeout") {
+        logger.warn({ check: name }, "readiness check timed out");
+        return name;
+      }
+      return result ? undefined : name;
+    } catch (error) {
+      logger.warn({ err: error, check: name }, "readiness check failed");
+      return name;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function ready(response: ServerResponse, path: string): Promise<void> {
     const results = await Promise.all(
-      Object.entries(readiness).map(async ([name, check]) => {
-        try {
-          return (await check()) ? undefined : name;
-        } catch (error) {
-          logger.warn({ err: error, check: name }, "readiness check failed");
-          return name;
-        }
-      }),
+      Object.entries(readiness).map(([name, check]) => runCheck(name, check)),
     );
     const failing = results.filter((name) => name !== undefined);
-    if (closing) failing.unshift("shutdown");
+    if (state !== "running") failing.unshift("shutdown");
     if (failing.length > 0) {
       sendProblem(response, 503, "unavailable", "The service is not ready", path, { failing });
       return;
     }
-    send(response, 200, { status: "ready" });
+    sendJson(response, 200, { status: "ready" });
   }
 
   async function dispatch(
@@ -192,7 +226,7 @@ export function createService(options: ServiceOptions): Service {
   ): Promise<void> {
     const method = raw.method ?? "GET";
     if (method === "GET" && path === "/health") {
-      send(response, 200, { status: "ok" });
+      sendJson(response, 200, { status: "ok" });
       return;
     }
     if (method === "GET" && path === "/ready") {
@@ -203,17 +237,12 @@ export function createService(options: ServiceOptions): Service {
       metrics(raw, response);
       return;
     }
-    const match = route(method, path);
-    if (!match) throw new NotFoundError("The route does not exist");
-    if ("allow" in match) {
-      response.setHeader("allow", match.allow.join(", "));
-      throw new DomainError("not_found", 405, "The method is not allowed on this route");
-    }
     let body: Promise<unknown> | undefined;
+    const params: Record<string, string> = {};
     const request: Request = {
       method,
       path,
-      params: match.params,
+      params,
       query: new URLSearchParams(search),
       headers: raw.headers,
       raw,
@@ -222,21 +251,42 @@ export function createService(options: ServiceOptions): Service {
       json: () => (body ??= readJson(raw, bodyLimit)),
     };
     for (const hook of before) await hook(request);
+    const match = route(method, path);
+    if (!match) throw new NotFoundError("The route does not exist");
+    if ("allow" in match) {
+      throw new DomainError("method_not_allowed", 405, "The method is not allowed on this route", {
+        allow: match.allow.join(", "),
+      });
+    }
+    Object.assign(params, match.params);
     const reply = await match.route.handler(request);
     for (const [name, value] of Object.entries(reply.headers ?? {})) {
       response.setHeader(name, value);
     }
-    send(response, reply.status ?? 200, reply.body);
+    const type = response.getHeader("content-type");
+    send(response, reply.status ?? 200, reply.body, String(type ?? "application/json"));
   }
 
-  function fail(response: ServerResponse, error: unknown, path: string): void {
+  function fail(
+    raw: IncomingMessage,
+    response: ServerResponse,
+    error: unknown,
+    path: string,
+  ): void {
     if (error instanceof DomainError) {
+      for (const [name, value] of Object.entries(error.headers)) response.setHeader(name, value);
+      if (error.headers.connection === "close") {
+        const socket = raw.socket;
+        response.once("finish", () => {
+          socket.destroy();
+        });
+      }
       const extra =
         error instanceof ValidationError && error.issues.length > 0 ? { errors: error.issues } : {};
       sendProblem(response, error.status, error.code, error.message, path, extra);
       return;
     }
-    logger.error({ err: error }, "unhandled error");
+    logger.error({ err: error, method: raw.method, path }, "unhandled error");
     sendProblem(response, 500, "internal", "An internal error occurred", path);
   }
 
@@ -249,8 +299,11 @@ export function createService(options: ServiceOptions): Service {
       response.setHeader("x-correlation-id", correlationId);
       response.setHeader("x-content-type-options", "nosniff");
       response.setHeader("cache-control", "no-store");
+      if (state !== "running") response.setHeader("connection", "close");
+      active.add(response);
       response.once("close", () => {
-        if (closing) server.closeIdleConnections();
+        active.delete(response);
+        if (state === "closing") server.closeIdleConnections();
       });
       const url = raw.url ?? "/";
       const mark = url.indexOf("?");
@@ -260,11 +313,14 @@ export function createService(options: ServiceOptions): Service {
         dispatch(raw, response, { requestId, correlationId }, path, search).catch(
           (error: unknown) => {
             if (response.headersSent) {
-              logger.error({ err: error }, "error after the response started");
+              logger.error(
+                { err: error, method: raw.method, path },
+                "error after the response started",
+              );
               response.destroy();
               return;
             }
-            fail(response, error, path);
+            fail(raw, response, error, path);
           },
         ),
       );
@@ -272,28 +328,52 @@ export function createService(options: ServiceOptions): Service {
   );
   server.maxHeadersCount = 100;
 
-  function close(): Promise<void> {
-    closing ??= (async () => {
-      const closed = new Promise<void>((resolve) => {
-        server.close(() => {
-          resolve();
-        });
-      });
-      server.closeIdleConnections();
-      const timer = setTimeout(() => {
-        logger.warn("shutdown timeout, closing open connections");
-        server.closeAllConnections();
+  async function shutdown(): Promise<boolean> {
+    state = "draining";
+    for (const response of active) {
+      if (!response.headersSent) response.setHeader("connection", "close");
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => {
+        resolve("expired");
       }, shutdownTimeoutMs);
-      await closed;
-      clearTimeout(timer);
-      for (const hook of [...closeHooks].reverse()) {
-        try {
-          await hook();
-        } catch (error) {
-          logger.error({ err: error }, "close hook failed");
-        }
-      }
-    })();
+    });
+    let clean = true;
+    await Promise.race([sleep(drainDelayMs), expired]);
+    state = "closing";
+    const closed = new Promise<void>((resolve) => {
+      server.close(() => {
+        resolve();
+      });
+    });
+    server.closeIdleConnections();
+    if ((await Promise.race([closed, expired])) === "expired") {
+      logger.error("shutdown deadline passed, closing open connections");
+      server.closeAllConnections();
+      clean = false;
+    }
+    for (const hook of [...closeHooks].reverse()) {
+      const run = Promise.resolve()
+        .then(hook)
+        .then(
+          () => true,
+          (error: unknown) => {
+            logger.error({ err: error }, "close hook failed");
+            return false;
+          },
+        );
+      const result = await Promise.race([run, expired]);
+      if (result === "expired")
+        logger.error("a close hook did not end before the shutdown deadline");
+      if (result !== true) clean = false;
+    }
+    clearTimeout(timer);
+    return clean;
+  }
+
+  function close(): Promise<boolean> {
+    closing ??= shutdown();
     return closing;
   }
 
@@ -309,14 +389,17 @@ export function createService(options: ServiceOptions): Service {
       }),
     close,
     handleSignals(exit = (code) => process.exit(code)) {
+      if (signalsHandled) return;
+      signalsHandled = true;
+      let exiting: Promise<void> | undefined;
       const onSignal = (signal: NodeJS.Signals): void => {
         logger.info({ signal }, "shutdown started");
-        void close().then(() => {
-          exit(0);
+        exiting ??= close().then((clean) => {
+          exit(clean ? 0 : 1);
         });
       };
-      process.once("SIGTERM", onSignal);
-      process.once("SIGINT", onSignal);
+      process.on("SIGTERM", onSignal);
+      process.on("SIGINT", onSignal);
     },
   };
 }
