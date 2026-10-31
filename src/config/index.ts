@@ -17,11 +17,39 @@ export class ConfigError extends Error {
   }
 }
 
+type Env = Record<string, string | undefined>;
+
+function throwingName(schema: z.ZodType, env: Env): string {
+  if (schema instanceof z.ZodObject) {
+    for (const [name, field] of Object.entries<z.ZodType>(schema.shape)) {
+      try {
+        field.safeParse(env[name]);
+      } catch {
+        return name;
+      }
+    }
+  }
+  return "(root)";
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value)) deepFreeze(item);
+  }
+  return value;
+}
+
 export function loadConfig<S extends z.ZodType>(
   schema: S,
-  env: Record<string, string | undefined> = process.env,
+  env: Env = process.env,
 ): Readonly<z.output<S>> {
-  const parsed = schema.safeParse(env);
+  let parsed: z.ZodSafeParseResult<z.output<S>>;
+  try {
+    parsed = schema.safeParse(env);
+  } catch {
+    throw new ConfigError([{ name: throwingName(schema, env), message: "The value is not valid" }]);
+  }
   if (!parsed.success) {
     throw new ConfigError(
       parsed.error.issues.map((issue) => ({
@@ -30,7 +58,7 @@ export function loadConfig<S extends z.ZodType>(
       })),
     );
   }
-  return Object.freeze(parsed.data);
+  return deepFreeze(parsed.data);
 }
 
 export const commonEnv = z.object({

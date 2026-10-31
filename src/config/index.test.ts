@@ -49,6 +49,49 @@ test("lists the bad names and never the values", () => {
   assert.match(error.message, /^The configuration is not valid: SERVICE_NAME: /);
 });
 
+test("hides the value when a transform throws", () => {
+  const throwing = z.object({
+    SERVICE_NAME: z.string(),
+    FEATURES: z.string().transform((text) => JSON.parse(text) as unknown),
+    WEBHOOK: z.string().transform((text) => new URL(text)),
+  });
+  for (const [env, name] of [
+    [{ SERVICE_NAME: "a", FEATURES: "{secret-json", WEBHOOK: "https://x" }, "FEATURES"],
+    [{ SERVICE_NAME: "a", FEATURES: "{}", WEBHOOK: "secret-url-value" }, "WEBHOOK"],
+  ] as const) {
+    let caught: unknown;
+    try {
+      loadConfig(throwing, env);
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught instanceof ConfigError);
+    assert.equal(caught.cause, undefined);
+    assert.deepEqual(caught.issues, [{ name, message: "The value is not valid" }]);
+    const text = `${caught.message} ${String(caught.stack)}`;
+    assert.ok(!text.includes("secret"), text);
+  }
+  assert.throws(
+    () =>
+      loadConfig(
+        z.string().transform(() => {
+          throw new Error("secret");
+        }),
+        {},
+      ),
+    (error: unknown) => error instanceof ConfigError && error.issues[0]?.name === "(root)",
+  );
+});
+
+test("freezes nested values", () => {
+  const config = loadConfig(
+    z.object({ LIST: z.string().transform((text) => ({ items: text.split(",") })) }),
+    { LIST: "a,b" },
+  );
+  assert.ok(Object.isFrozen(config.LIST));
+  assert.ok(Object.isFrozen(config.LIST.items));
+});
+
 test("names a root issue", () => {
   assert.throws(
     () => loadConfig(z.string(), {}),
