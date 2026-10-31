@@ -46,7 +46,7 @@ jobs:
         run: npm audit --audit-level=high
 
   integration:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -61,18 +61,3 @@ jobs:
 
       - name: Integration tests
         run: npm run test:integration
-
-  probe:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, ubuntu-24.04]
-        image: ["mongo:8.0.34", "mongo:8.2.12"]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - run: |
-          uname -r
-          docker run -d --name dbg ${{ matrix.image }} --replSet rs0 --bind_ip_all
-          sleep 75
-          docker ps -a --format '{{.Status}}'
-          docker logs dbg 2>&1 | grep -E '"s":"F"|Waiting for connections' | cut -c1-300

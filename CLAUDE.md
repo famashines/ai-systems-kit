@@ -34,6 +34,12 @@ fixed sleep. Close each relay and consumer, also when a test fails, else
 the process does not stop. `messaging.integration.ts` runs with the
 ADR 0023 grants of a test user `worker`.
 
+The CI job `integration` runs on `ubuntu-22.04` (kernel 6.8). `mongo:8.0.34`
+does not start on Linux 6.19 to 7.0.13 (MongoDB SERVER-121912, SERVER-125742),
+and `ubuntu-24.04` has kernel 7.0.0. Move the job back to `ubuntu-24.04` when
+its kernel is 7.0.14 or newer, or when gitops moves to a MongoDB version that
+starts on it.
+
 ## TypeScript 6 and 7
 
 `typescript-eslint` needs the TypeScript 6 API, and TypeScript 7 has no JS
