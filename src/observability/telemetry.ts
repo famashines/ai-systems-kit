@@ -5,7 +5,11 @@ import { PrometheusExporter } from "@opentelemetry/exporter-prometheus";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { HttpInstrumentation } from "@opentelemetry/instrumentation-http";
 import { UndiciInstrumentation } from "@opentelemetry/instrumentation-undici";
-import { resourceFromAttributes } from "@opentelemetry/resources";
+import {
+  envDetector,
+  resourceFromAttributes,
+  serviceInstanceIdDetector,
+} from "@opentelemetry/resources";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 
 const probes = new Set(["/health", "/ready", "/metrics"]);
@@ -35,9 +39,10 @@ export function startTelemetry(options: TelemetryOptions): Telemetry {
       "service.name": options.serviceName,
       "service.version": options.release,
     }),
+    resourceDetectors: [envDetector, serviceInstanceIdDetector],
     metricReaders: [exporter],
     logRecordProcessors: [],
-    ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+    ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT || process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
       ? { traceExporter: new OTLPTraceExporter() }
       : { spanProcessors: [] }),
     instrumentations: [

@@ -4,6 +4,7 @@ import { trace } from "@opentelemetry/api";
 import { startTelemetry } from "./index.ts";
 
 delete process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+delete process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT;
 const telemetry = startTelemetry({ serviceName: "gateway", release: "v1" });
 const { createService } = await import("../http/index.ts");
 const { createLogger } = await import("./index.ts");
@@ -47,6 +48,8 @@ test("serves custom and http metrics on /metrics of the same server", async () =
   assert.match(text, /llm_call_duration/);
   assert.match(text, /http_server_request_duration_count/);
   assert.match(text, /service_name="gateway",service_version="v1"/);
+  assert.match(text, /service_instance_id="[0-9a-f-]{36}"/);
+  assert.doesNotMatch(text, /process_command|process_executable|host_name/);
 });
 
 test("logs no trace id without an OTLP endpoint", () => {

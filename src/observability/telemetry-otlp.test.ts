@@ -18,7 +18,7 @@ await new Promise<void>((resolve) => free.listen(0, "127.0.0.1", resolve));
 const metricsPort = (free.address() as AddressInfo).port;
 await new Promise((resolve) => free.close(resolve));
 
-process.env.OTEL_EXPORTER_OTLP_ENDPOINT = `http://127.0.0.1:${String((collector.address() as AddressInfo).port)}`;
+process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = `http://127.0.0.1:${String((collector.address() as AddressInfo).port)}/v1/traces`;
 const telemetry = startTelemetry({ serviceName: "orchestration", release: "v2", metricsPort });
 const { createService } = await import("../http/index.ts");
 const { createLogger } = await import("./index.ts");
