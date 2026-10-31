@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1
+
+- Local system: `dev/nats/streams/VIEWS.json` synced from gitops
+  (`max_consumers` 64, ADR 0025).
+- Tests: the `./auth` test "a valid token gives the subject" compares `exp`
+  with the value in the token, so it does not fail at a second boundary.
+  The `observeGauge` test checks that the last value stays after the
+  remove.
+
 ## 0.3.0
 
 - `./nats`: `connectNats` with the service inbox prefix, `orderedStream`
