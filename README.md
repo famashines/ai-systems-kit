@@ -546,9 +546,10 @@ localhost:8080 /api --> api-gateway        socket-gateway <-- localhost:8081 /ws
 ### Quickstart in 10 minutes
 
 You need git, Docker, Docker Compose and Node 26. Tested versions:
-Docker 29.8.2 with Compose 5.6.0 (laptop), and the Docker and Compose of
-the GitHub `ubuntu-22.04` runner (the `e2e` job prints them). Older
-versions are not tested. Compose must support `up --wait` with one-shot
+Docker 29.8.2 with Compose 5.6.0 (laptop), and Docker 28.0.4 with
+Compose 2.38.2 (the GitHub `ubuntu-22.04` runner; the `e2e` job prints
+them). Use Docker 28 and Compose 2.38 or later; older versions are not
+tested. Compose must support `up --wait` with one-shot
 services (`service_completed_successfully`). The workspace layout is
 fixed: the services are in `../services/ai-systems-<name>`.
 
