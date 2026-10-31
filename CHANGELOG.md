@@ -3,10 +3,14 @@
 ## 0.2.0
 
 - `./auth`: `createJwtVerifier` checks Keycloak access tokens with `jose`
-  (RS256 only, `iss`, `aud`, `exp`, `nbf`, `iat`, `typ`, realm role) against
+  (RS256 only, `iss`, `aud`, `azp`, `exp`, `nbf`, `iat`, `typ`, realm role) against
   the remote JWKS with cache, rotation and a refetch cooldown. 401, 403 and
   503 (JWKS not available) are `DomainError`s with `WWW-Authenticate`.
   `bearerHook` for `./http` and `subjectOf`.
+- `./auth` review fixes: `azp` must be the audience. An optional `logger`
+  gets a warn line when a JWKS fetch fails. After a failed fetch, no fetch
+  for 5 seconds (cached keys still work, other tokens get 503). A refused
+  request with a body gets `connection: close`, and the body is not read.
 - `./messaging`: after a MongoDB or NATS outage, the consumer checks the
   processed marker again before the handler runs again. If another pod
   processed the event during the outage, the consumer acks it and the

@@ -132,10 +132,11 @@ const handler: Handler = (request) => ({ body: { sub: subjectOf(request).sub } }
 const subject = await verify(token);
 ```
 
-- `createJwtVerifier({ issuer, audience, requiredRole, jwksUrl?, clockToleranceSec? })`
+- `createJwtVerifier({ issuer, audience, requiredRole, jwksUrl?, clockToleranceSec?, logger? })`
   gives `verify(token)`, which gives the subject `{ sub, roles, exp }`.
   `jwksUrl` is `<issuer>/protocol/openid-connect/certs` by default.
-  `clockToleranceSec` is 30 by default.
+  `clockToleranceSec` is 30 by default. `logger` (pino) gets a warn line
+  with the error and the JWKS URL when a JWKS fetch fails.
 - `verify` does not need HTTP. socket-gateway calls it with the token of
   `hello`.
 - The checks:
@@ -150,6 +151,7 @@ const subject = await verify(token);
   | `exp` and `nbf` (with the tolerance)                           | 401     |
   | `sub`, `exp` and `iat` are present; `iat` is not in the future | 401     |
   | `typ` is `Bearer` (a Keycloak access token, not an ID token)   | 401     |
+  | `azp` is the audience (the token is for this client)           | 401     |
   | `realm_access.roles` has the role                              | 403     |
   | the JWKS cannot be read (error, timeout, bad answer)           | 503     |
 
@@ -160,13 +162,22 @@ const subject = await verify(token);
   does not sign out.
 - The JWKS (jose `createRemoteJWKSet`) is kept for 10 minutes. A token with
   an unknown `kid` causes one new fetch, but at most one fetch each 30
-  seconds. So a key rotation in Keycloak works with no restart, and tokens
-  with random `kid` values cannot flood Keycloak. Each fetch has a 5 second
-  timeout. The first fetch is at the first token, not at start.
+  seconds after a fetch that worked. So a key rotation in Keycloak works
+  with no restart, and tokens with random `kid` values cannot flood
+  Keycloak. Each fetch has a 5 second timeout. The first fetch is at the
+  first token, not at start.
+- After a fetch that failed, the verifier makes no fetch for 5 seconds.
+  In that time, keys that are in the cache (and not older than 10 minutes)
+  still work, and all other tokens get 503. So during a Keycloak outage,
+  tokens with random `kid` values cause at most one fetch each 5 seconds,
+  and only one warn line each 5 seconds.
 - `bearerHook(verify)` is a `before` hook of `./http`. It accepts only
   `Authorization: Bearer <token>` (that case, one space, at most 8192
   characters, token characters of RFC 6750). It puts the subject in
   `request.state.subject`. `subjectOf(request)` gives it with its type.
+  When the hook refuses a request that has a body (`content-length` above
+  0 or `transfer-encoding`), the answer has `connection: close` and the
+  server closes the socket, as for 413 and 415. It does not read the body.
   The hook runs before routing, so a request with no valid token gets 401
   on all paths, also on paths that do not exist. `/health`, `/ready` and
   `/metrics` have no hooks, so they stay open.

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import { connect, type AddressInfo } from "node:net";
 import { after, before, describe, test } from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   exportJWK,
   exportSPKI,
@@ -84,6 +86,7 @@ const sign = (claims: Record<string, unknown> = {}, key: Key = first): Promise<s
     iat: now(),
     exp: now() + 300,
     typ: "Bearer",
+    azp: audience,
     realm_access: { roles: ["owner", "default-roles-ai-systems"] },
     ...claims,
   })
@@ -182,6 +185,7 @@ describe("createJwtVerifier", () => {
       iat: now(),
       exp: now() + 300,
       typ: "Bearer",
+      azp: audience,
       realm_access: { roles: ["owner"] },
     }).encode();
     await fails(verify(token), 401, "invalid_token");
@@ -198,6 +202,7 @@ describe("createJwtVerifier", () => {
       iat: now(),
       exp: now() + 300,
       typ: "Bearer",
+      azp: audience,
       realm_access: { roles: ["owner"] },
     })
       .setProtectedHeader({ alg: "HS256", kid: "k1" })
@@ -243,11 +248,28 @@ describe("createJwtVerifier", () => {
     assert.equal(fetches, 3);
   });
 
-  test("a JWKS that cannot be read gives 503, and the next call tries again", async () => {
-    const verify = fresh();
+  test("a JWKS that cannot be read gives 503 and one warn log; the next fetch waits 5 s", async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const lines: string[] = [];
+    const logger = pino({ level: "warn" }, { write: (line: string) => lines.push(line) });
+    const verify = fresh({ logger });
     jwksStatus = 500;
     await fails(verify(await sign()), 503);
+    assert.equal(fetches, 1);
+    assert.equal(lines.length, 1);
+    const line = JSON.parse(lines[0] ?? "{}") as {
+      level: number;
+      jwksUrl: string;
+      err: { message: string };
+    };
+    assert.equal(line.level, 40);
+    assert.equal(line.jwksUrl, jwksUrl);
+    assert.match(line.err.message, /200 OK/);
     jwksStatus = 200;
+    await fails(verify(await sign()), 503);
+    assert.equal(fetches, 1);
+    assert.equal(lines.length, 1);
+    t.mock.timers.tick(5_000);
     await verify(await sign());
     assert.equal(fetches, 2);
     const down = createJwtVerifier({
@@ -257,6 +279,30 @@ describe("createJwtVerifier", () => {
       jwksUrl: "http://127.0.0.1:1/certs",
     });
     await fails(down(await sign()), 503);
+  });
+
+  test("during the 5 s after a failed refetch, cached keys still work and unknown keys give 503", async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const verify = fresh();
+    await verify(await sign());
+    t.mock.timers.tick(31_000);
+    jwksStatus = 500;
+    await fails(verify(await sign({}, stranger)), 503);
+    assert.equal(fetches, 2);
+    await verify(await sign());
+    await fails(verify(await sign({}, stranger)), 503);
+    await fails(verify(`${(await sign()).slice(0, -4)}AAAA`), 401, "invalid_token");
+    assert.equal(fetches, 2);
+    jwksStatus = 200;
+    t.mock.timers.tick(5_000);
+    await fails(verify(await sign({}, stranger)), 401, "invalid_token");
+    assert.equal(fetches, 3);
+  });
+
+  test("an azp of another client gives 401", async () => {
+    const verify = fresh();
+    await fails(verify(await sign({ azp: "account-console" })), 401, "invalid_token");
+    await fails(verify(await sign({ azp: undefined })), 401, "invalid_token");
   });
 });
 
@@ -337,6 +383,70 @@ describe("bearerHook", () => {
       response.headers.get("www-authenticate"),
       'Bearer realm="ai-systems", error="insufficient_scope"',
     );
+  });
+
+  test("a 401 for a request with a body closes the connection, with no read of the body", async () => {
+    await start();
+    const port = (services.at(-1)?.server.address() as AddressInfo).port;
+    const socket = connect(port, "127.0.0.1");
+    await once(socket, "connect");
+    let received = "";
+    socket.on("data", (data: Buffer) => {
+      received += data.toString();
+    });
+    socket.on("error", () => undefined);
+    socket.write(
+      "POST /api/me HTTP/1.1\r\nhost: kit\r\ncontent-type: application/json\r\n" +
+        `content-length: ${String(10 * 1024 * 1024)}\r\n\r\n`,
+    );
+    const chunk = "a".repeat(0x4000);
+    let sent = 0;
+    const flood = setInterval(() => {
+      if (!socket.writable) return;
+      socket.write(chunk);
+      sent += chunk.length;
+    }, 1);
+    const closed = new Promise<string>((resolve) => {
+      socket.once("close", () => {
+        resolve("closed");
+      });
+    });
+    const result = await Promise.race([closed, sleep(1000).then(() => "open")]);
+    clearInterval(flood);
+    socket.destroy();
+    assert.equal(result, "closed");
+    assert.ok(sent < 1024 * 1024, `the server read ${String(sent)} bytes`);
+    assert.match(received, /^HTTP\/1\.1 401/);
+    assert.match(received, /connection: close/i);
+  });
+
+  test("a 403 or 503 for a request with a body closes the connection; with no body it stays open", async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+    const call = await start();
+    const token = await sign({ realm_access: { roles: [] } });
+    const withBody = await fetch(
+      `http://127.0.0.1:${String((services.at(-1)?.server.address() as AddressInfo).port)}/api/me`,
+      { method: "POST", headers: { authorization: `Bearer ${token}` }, body: "{}" },
+    );
+    assert.equal(withBody.status, 403);
+    assert.equal(withBody.headers.get("connection"), "close");
+    assert.match(withBody.headers.get("www-authenticate") ?? "", /insufficient_scope/);
+    t.mock.timers.tick(31_000);
+    jwksStatus = 500;
+    const down = await fetch(
+      `http://127.0.0.1:${String((services.at(-1)?.server.address() as AddressInfo).port)}/api/me`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${await sign({}, stranger)}` },
+        body: "{}",
+      },
+    );
+    assert.equal(down.status, 503);
+    assert.equal(down.headers.get("connection"), "close");
+    jwksStatus = 200;
+    const noBody = await call("/api/me", `Bearer ${token}`);
+    assert.equal(noBody.status, 403);
+    assert.notEqual(noBody.headers.get("connection"), "close");
   });
 
   test("subjectOf with no hook gives 401", () => {
