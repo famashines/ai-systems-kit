@@ -59,14 +59,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Debug mongo
-        run: |
-          docker run -d --name dbg mongo:8.0.34 --replSet rs0 --bind_ip_all
-          sleep 15
-          docker ps -a
-          docker logs dbg 2>&1 | tail -40
-          uname -a
-          grep -m1 -o -w 'avx[^ ]*' /proc/cpuinfo | sort -u
-
       - name: Integration tests
         run: npm run test:integration
+
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        image: ["mongo:8.0.34", "mongo:8.2.12"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: |
+          uname -r
+          docker run -d --name dbg ${{ matrix.image }} --replSet rs0 --bind_ip_all
+          sleep 75
+          docker ps -a --format '{{.Status}}'
+          docker logs dbg 2>&1 | grep -E '"s":"F"|Waiting for connections' | cut -c1-300
