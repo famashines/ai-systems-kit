@@ -1,17 +1,12 @@
 import type { EventEnvelopeV1, RegisteredEvent } from "@famashines/ai-systems-contracts";
 import { jetstream, type Consumer, type ConsumerMessages, type JsMsg } from "@nats-io/jetstream";
 import { headers } from "@nats-io/transport-node";
-import {
-  context,
-  metrics,
-  propagation,
-  ROOT_CONTEXT,
-  type ObservableResult,
-} from "@opentelemetry/api";
+import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
 import type { ClientSession, Db } from "mongodb";
 import { rules, type Parse, type Upcasters } from "../event-store/rules.ts";
 import type { CloseHook, ReadinessCheck } from "../http/server.ts";
 import type { Migration } from "../mongo/migrations.io.ts";
+import { observeGauge } from "../nats/gauge.ts";
 import type { Nats } from "./connect.io.ts";
 import {
   backoff,
@@ -74,16 +69,13 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
   let consumer: Consumer | undefined;
   let messages: ConsumerMessages | undefined;
   const held = new Map<JsMsg, number>();
-  const oldestHeld = metrics
-    .getMeter("ai-systems-kit")
-    .createObservableGauge("consumer_oldest_held_seconds", {
-      description: "Age of the oldest message that the consumer holds and did not ack yet",
-    });
-  const observe = (result: ObservableResult): void => {
-    const since = Math.min(...held.values());
-    result.observe(held.size === 0 ? 0 : (Date.now() - since) / 1000, { stream, durable });
-  };
-  oldestHeld.addCallback(observe);
+  const removeGauge = observeGauge(
+    "ai-systems-kit",
+    "consumer_oldest_held_seconds",
+    "Age of the oldest message that the consumer holds and did not ack yet",
+    () => (held.size === 0 ? 0 : (Date.now() - Math.min(...held.values())) / 1000),
+    { stream, durable },
+  );
 
   async function healthy(): Promise<boolean> {
     let timer: NodeJS.Timeout | undefined;
@@ -306,7 +298,7 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
     },
     close: async () => {
       timing.stop();
-      oldestHeld.removeCallback(observe);
+      removeGauge();
       await messages?.close();
       await loop;
     },
