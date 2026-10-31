@@ -14,6 +14,9 @@ Rules for all ai-systems repos: `ai-systems-docs/CLAUDE.md`
 | `npm test`                 | `node --test` with the coverage gate: 90% lines, 85% branches |
 | `npm run verify`           | check, lint and test                                          |
 | `npm run test:integration` | `*.integration.ts` with Testcontainers (needs Docker)         |
+| `npm run dev:up`           | local system from `compose.yaml` (README, "Local system")     |
+| `npm run dev:e2e`          | end-to-end check against the local system                     |
+| `npm run dev:down`         | stop the local system and delete its volumes                  |
 
 ## Layout
 
@@ -25,6 +28,12 @@ Code that needs MongoDB or NATS is in `*.io.ts` files. The unit coverage
 gate does not include them. The integration tests (`*.integration.ts`,
 not in `dist/`) cover them. Keep logic that needs no container in other
 files, with unit tests.
+
+## Local system
+
+`dev/mongo/` and `dev/nats/` are copies from gitops (`npm run dev:sync`).
+Do not edit them by hand. Each `docker compose` command needs
+`--env-file .env.local`. Run `npm run dev:down` when you are done.
 
 ## Integration tests
 
