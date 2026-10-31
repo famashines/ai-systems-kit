@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Local system: `compose.yaml` with MongoDB, NATS (gitops grants and
+  streams), a local OIDC issuer and the four M1 services, `npm run
+dev:up`, `dev:e2e`, `dev:down` and `dev:sync`, and the CI job `e2e`.
+
 ## 0.2.0
 
 - `./auth`: `createJwtVerifier` checks Keycloak access tokens with `jose`

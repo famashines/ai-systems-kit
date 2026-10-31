@@ -57,7 +57,11 @@
     "format": "prettier --write .",
     "test": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' --test-coverage-exclude='src/**/*.io.ts' 'src/**/*.test.ts'",
     "verify": "npm run check && npm run lint && npm test",
-    "test:integration": "node --test --test-timeout=300000 'src/**/*.integration.ts'"
+    "test:integration": "node --test --test-timeout=300000 'src/**/*.integration.ts'",
+    "dev:up": "sh dev/env.sh && docker compose --env-file .env.local up --build --wait --wait-timeout 600",
+    "dev:down": "docker compose --env-file .env.local down -v",
+    "dev:e2e": "node dev/e2e.ts",
+    "dev:sync": "node dev/sync-gitops.ts"
   },
   "dependencies": {
     "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.1.0",
@@ -82,6 +86,7 @@
     "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-7": "npm:typescript@7.0.2",
     "typescript-eslint": "8.72.1",
+    "yaml": "2.9.1",
     "zod": "4.6.7"
   },
   "allowScripts": {

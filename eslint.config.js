@@ -2,7 +2,7 @@ import { defineConfig } from "eslint/config";
 import tseslint from "typescript-eslint";
 
 export default defineConfig(
-  { ignores: ["dist/", "coverage/", "eslint.config.js"] },
+  { ignores: ["dist/", "coverage/", "eslint.config.js", "dev/mongo/", "dev/nats/"] },
   tseslint.configs.strictTypeChecked,
   {
     languageOptions: {

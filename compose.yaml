@@ -1,0 +1,162 @@
+name: ai-systems-local
+
+x-node-ready: &node-ready
+  test:
+    - CMD
+    - node
+    - -e
+    - "fetch('http://localhost:8080/ready').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+  interval: 2s
+  timeout: 3s
+  retries: 60
+
+x-service: &service
+  read_only: true
+  restart: unless-stopped
+  healthcheck: *node-ready
+
+services:
+  mongodb:
+    image: mongo:8.0.34@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142
+    entrypoint:
+      - bash
+      - -c
+      - >-
+        head -c 756 /dev/urandom | base64 -w0 > /tmp/keyfile &&
+        chown 999:999 /tmp/keyfile && chmod 400 /tmp/keyfile &&
+        exec docker-entrypoint.sh mongod --replSet rs0 --keyFile /tmp/keyfile
+        --bind_ip_all --wiredTigerCacheSizeGB 0.25
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: ${ROOT_PASSWORD:?run sh dev/env.sh and pass --env-file .env.local}
+    healthcheck:
+      test: [CMD, mongosh, --quiet, --norc, --eval, "db.adminCommand('ping').ok"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  mongodb-init:
+    image: mongo:8.0.34@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142
+    command: [mongosh, --nodb, --quiet, --norc, /init/init.js]
+    user: "999:999"
+    env_file: .env.local
+    environment:
+      HOME: /tmp
+      MONGODB_HOST: mongodb:27017
+    volumes:
+      - ./dev/mongo:/init:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  nats:
+    image: nats:2.15.2-alpine@sha256:823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5
+    command: [-c, /etc/nats/nats.conf]
+    env_file: .env.local
+    volumes:
+      - ./dev/nats/nats.conf:/etc/nats/nats.conf:ro
+      - ./dev/nats/accounts.conf:/etc/nats/accounts.conf:ro
+    tmpfs:
+      - /data
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  nats-streams:
+    image: natsio/nats-box:0.20.1-nonroot@sha256:9eec37227e52bf4d207ffc246284034c18dd09d51bae0bfd2af9dbbd77ba4d44
+    command: [sh, /streams/streams.sh]
+    environment:
+      HOME: /tmp
+      NATS_URL: nats://nats:4222
+      NATS_USER: ai-systems-admin
+      NATS_PASSWORD: ${AI_SYSTEMS_ADMIN_PASSWORD:?run sh dev/env.sh}
+    volumes:
+      - ./dev/nats/streams:/streams:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+
+  issuer:
+    image: node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39
+    command: [node, /issuer/server.ts]
+    user: "1000:1000"
+    read_only: true
+    environment:
+      ISSUER: http://issuer:8080/realms/ai-systems
+    volumes:
+      - ./dev/issuer:/issuer:ro
+    ports:
+      - 127.0.0.1:8082:8080
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://localhost:8080/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  orchestration:
+    <<: *service
+    build: ../services/ai-systems-orchestration
+    environment:
+      MONGODB_URI: mongodb://orchestration:${ORCHESTRATION_PASSWORD:?run sh dev/env.sh}@mongodb:27017/orchestration?replicaSet=rs0
+      NATS_SERVERS: nats://nats:4222
+      NATS_USER: ai-systems-orchestration
+      NATS_PASSWORD: ${AI_SYSTEMS_ORCHESTRATION_PASSWORD:?run sh dev/env.sh}
+    depends_on:
+      mongodb-init:
+        condition: service_completed_successfully
+      nats-streams:
+        condition: service_completed_successfully
+
+  projections:
+    <<: *service
+    build: ../services/ai-systems-projections
+    environment:
+      MONGODB_URI: mongodb://projections:${PROJECTIONS_PASSWORD:?run sh dev/env.sh}@mongodb:27017/projections?replicaSet=rs0
+      NATS_SERVERS: nats://nats:4222
+      NATS_USER: ai-systems-projections
+      NATS_PASSWORD: ${AI_SYSTEMS_PROJECTIONS_PASSWORD:?run sh dev/env.sh}
+      ORCHESTRATION_URL: http://orchestration:8080
+    depends_on:
+      mongodb-init:
+        condition: service_completed_successfully
+      nats-streams:
+        condition: service_completed_successfully
+
+  api-gateway:
+    <<: *service
+    build: ../services/ai-systems-api-gateway
+    environment:
+      ORCHESTRATION_URL: http://orchestration:8080
+      PROJECTIONS_URL: http://projections:8080
+      OIDC_ISSUER: http://issuer:8080/realms/ai-systems
+    ports:
+      - 127.0.0.1:8080:8080
+    depends_on:
+      issuer:
+        condition: service_healthy
+      orchestration:
+        condition: service_healthy
+      projections:
+        condition: service_healthy
+
+  socket-gateway:
+    <<: *service
+    build: ../services/ai-systems-socket-gateway
+    environment:
+      NATS_SERVERS: nats://nats:4222
+      NATS_USER: ai-systems-socket-gateway
+      NATS_PASSWORD: ${AI_SYSTEMS_SOCKET_GATEWAY_PASSWORD:?run sh dev/env.sh}
+      OIDC_ISSUER: http://issuer:8080/realms/ai-systems
+    ports:
+      - 127.0.0.1:8081:8080
+    depends_on:
+      issuer:
+        condition: service_healthy
+      nats-streams:
+        condition: service_completed_successfully

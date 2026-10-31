@@ -523,6 +523,136 @@ await app.listen(config.PORT);
 app.handleSignals();
 ```
 
+## Local system
+
+`compose.yaml` starts the full M1 system on one machine (ADR 0011,
+ADR 0017). It builds the four services from the sibling folders with their
+own Dockerfiles. NATS has the AISYSTEMS account with the gitops grants of
+each service (ADR 0023), and a local OIDC issuer signs real RS256 tokens.
+
+```
+                 localhost:8082 issuer (dev only, key made at start)
+                        | JWKS                    | JWKS
+localhost:8080 /api --> api-gateway        socket-gateway <-- localhost:8081 /ws
+                        |       \                 ^
+                        v        v                | VIEWS (ordered consumer)
+               orchestration   projections -------+
+                        |  \      |   ^
+                        v   \     v   | ORCHESTRATION (durable "projections")
+               MongoDB rs0   +--> NATS (account AISYSTEMS, 8 streams)
+               (1 member)
+```
+
+### Quickstart in 10 minutes
+
+You need git, Docker with Compose v2, and Node 26. The workspace layout
+is fixed: the services are in `../services/ai-systems-<name>`.
+
+```sh
+mkdir -p ai-systems/services && cd ai-systems
+git clone https://github.com/famashines/ai-systems-kit.git kit
+for name in orchestration projections api-gateway socket-gateway; do
+  git clone https://github.com/famashines/ai-systems-$name.git services/ai-systems-$name
+done
+cd kit
+npm run dev:up
+npm run dev:e2e
+npm run dev:down
+```
+
+No `npm ci` is necessary: the scripts use only Node and Docker.
+
+| Command            | Does                                                                                                            |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `npm run dev:up`   | makes `.env.local` if it is not there, builds the images, starts all containers and waits until all are healthy |
+| `npm run dev:e2e`  | runs `dev/e2e.ts` against the running system and prints a PASS or FAIL table (exit code 1 on FAIL)              |
+| `npm run dev:down` | stops all containers and deletes the volumes                                                                    |
+| `npm run dev:sync` | copies the gitops sources again (see below); needs a gitops checkout                                            |
+
+Each `docker compose` command needs `--env-file .env.local`, for example
+`docker compose --env-file .env.local logs -f projections`.
+
+### Ports
+
+Only these ports are on the host, and only on `127.0.0.1`:
+
+| Port   | Container      | Paths                                                      |
+| ------ | -------------- | ---------------------------------------------------------- |
+| `8080` | api-gateway    | `/api/tasks`, `/health`, `/ready`, `/metrics`              |
+| `8081` | socket-gateway | `/ws`, `/health`, `/ready`, `/metrics`                     |
+| `8082` | issuer         | `/realms/ai-systems/...` (discovery, JWKS, token endpoint) |
+
+MongoDB, NATS, orchestration and projections have no host port. Use
+`docker compose --env-file .env.local exec` to reach them.
+
+### Tokens
+
+`dev/issuer/server.ts` has no dependencies. At start it makes an RSA key.
+It serves `/realms/ai-systems/.well-known/openid-configuration`, the JWKS
+at `/realms/ai-systems/protocol/openid-connect/certs` (the kit/auth
+default) and a token endpoint. Each `POST` to the token endpoint gives an
+access token for one hour: RS256, `iss`
+`http://issuer:8080/realms/ai-systems`, `aud` and `azp` `ai-systems-app`,
+`typ` `Bearer`, realm role `owner`, and a fixed `sub`.
+
+```sh
+token=$(curl -s -X POST localhost:8082/realms/ai-systems/protocol/openid-connect/token | node -p 'JSON.parse(require("fs").readFileSync(0)).access_token')
+curl -s -H "authorization: Bearer $token" localhost:8080/api/tasks
+```
+
+The gateways check the `iss` with the container name `issuer`, so the
+token is the same from the host and from a container. A new start of the
+issuer makes a new key: get a new token.
+
+### Passwords
+
+`dev/env.sh` writes `.env.local` with a random password for each MongoDB
+user and each NATS user. Git ignores `.env.local`; never commit it. The
+script does not change a file that exists, because the MongoDB root user
+keeps its first password in the volume. `npm run dev:down` deletes the
+volumes, so you can delete `.env.local` after it. The MongoDB key file is
+made again at each start of the container (one member does not share it).
+
+### Sources from gitops
+
+The local system uses the gitops files, not a copy written by hand:
+
+| Local file               | gitops source (`origin/main`)                                                     |
+| ------------------------ | --------------------------------------------------------------------------------- |
+| `dev/mongo/init.js`      | `kubernetes/ai-systems/ai-systems-mongodb/base/init.js`                           |
+| `dev/nats/streams/*`     | `kubernetes/infrastructure/nats/manifests/ai-systems-streams/*`                   |
+| `dev/nats/accounts.conf` | `config.merge.accounts.AISYSTEMS` in `kubernetes/infrastructure/nats/values.yaml` |
+
+`npm run dev:sync` (`dev/sync-gitops.ts`) writes these files again from
+the gitops checkout at `../../../platform/gitops` (set `GITOPS_DIR` and
+`GITOPS_REF` to change it) and prints the gitops commit. It converts the
+account to NATS config JSON, and each `<< $NAME >>` password to the env
+var `$NAME`. The files are from gitops `13f559f`. gitops is private, so
+CI cannot read it: run the sync and commit the result when the grants or
+the streams change in gitops. ESLint and Prettier do not check these
+files, so they stay the same as in gitops.
+
+The one-shot containers `mongodb-init` and `nats-streams` run the same
+`init.js` and `streams.sh` as the gitops Jobs, with the same images. The
+services start only after both end with exit code 0.
+
+### Known limits
+
+- `nats-streams` logs one publish violation on `$SYS.REQ.USER.INFO`. It
+  comes from `nats account info` in the gitops `streams.sh`, and the
+  cluster has it too. It does not stop the script.
+- The system has no LLM, budget or conversation services yet (M1). The
+  e2e checks the task submit, the read model, the notices and the resume.
+- The first `npm run dev:up` builds four images and downloads the base
+  images. Later starts use the Docker build cache.
+
+### CI
+
+The `e2e` job in `.github/workflows/ci.yml` checks out kit and the four
+service repos at `main` in the same layout, runs `npm run dev:up` and
+`npm run dev:e2e`, and uploads the container logs when a step fails. It
+runs on `ubuntu-22.04` for the MongoDB kernel reason in `CLAUDE.md`.
+
 ## Commands
 
 See `CLAUDE.md`.
