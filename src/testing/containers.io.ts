@@ -1,8 +1,10 @@
 import { jetstreamManager, type StreamConfig } from "@nats-io/jetstream";
 import type { NatsConnection } from "@nats-io/transport-node";
 
-export const mongoImage = "mongo:8.0.34";
-export const natsImage = "nats:2.15.2";
+export const mongoImage =
+  "mongo:8.0.34@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142";
+export const natsImage =
+  "nats:2.15.2-alpine@sha256:823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5";
 
 export interface Started {
   url: string;
@@ -36,7 +38,7 @@ export async function startNats(options: { config?: string } = {}): Promise<Star
   const config = options.config ?? "jetstream { store_dir: /data }";
   const container = await new GenericContainer(natsImage)
     .withCopyContentToContainer([{ content: config, target: "/etc/nats/test.conf" }])
-    .withCommand(["-c", "/etc/nats/test.conf"])
+    .withCommand(["nats-server", "-c", "/etc/nats/test.conf"])
     .withTmpFs({ "/data": "rw" })
     .withExposedPorts(4222)
     .withWaitStrategy(Wait.forLogMessage(/Server is ready/))
