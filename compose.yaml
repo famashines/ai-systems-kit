@@ -10,22 +10,30 @@ x-node-ready: &node-ready
   timeout: 3s
   retries: 60
 
+x-hardened: &hardened
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+
 x-service: &service
+  <<: *hardened
   read_only: true
   healthcheck: *node-ready
 
 services:
   mongodb:
+    <<: *hardened
     image: mongo:8.0.34@sha256:b9924c330a8bbc5800fe9c69f04a84e221eca7b28fd049a0354147d9908fa142
+    user: "999:999"
     entrypoint:
       - bash
       - -c
       - >-
         head -c 756 /dev/urandom | base64 -w0 > /tmp/keyfile &&
-        chown 999:999 /tmp/keyfile && chmod 400 /tmp/keyfile &&
+        chmod 400 /tmp/keyfile &&
         exec docker-entrypoint.sh mongod --replSet rs0 --keyFile /tmp/keyfile
         --bind_ip_all --wiredTigerCacheSizeGB 0.25
     environment:
+      HOME: /tmp
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: ${ROOT_PASSWORD:?run sh dev/env.sh and pass --env-file .env.local}
     healthcheck:
@@ -49,14 +57,17 @@ services:
         condition: service_healthy
 
   nats:
+    <<: *hardened
     image: nats:2.15.2-alpine@sha256:823e7f1d6d8ffe3b30dbd73d4a06bbb939acf94929f7fdf224404da7a05bafb5
+    user: "1000:1000"
+    read_only: true
     command: [-c, /etc/nats/nats.conf]
     env_file: .env.local
     volumes:
       - ./dev/nats/nats.conf:/etc/nats/nats.conf:ro
       - ./dev/nats/accounts.conf:/etc/nats/accounts.conf:ro
     tmpfs:
-      - /data
+      - /data:uid=1000,gid=1000
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, "http://localhost:8222/healthz?js-enabled-only=true"]
       interval: 2s
@@ -78,6 +89,7 @@ services:
         condition: service_healthy
 
   issuer:
+    <<: *hardened
     image: node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39
     command: [node, /issuer/server.ts]
     user: "1000:1000"
@@ -86,6 +98,7 @@ services:
       ISSUER: http://issuer:8080/realms/ai-systems
     volumes:
       - ./dev/issuer:/issuer:ro
+      - issuer-key:/home/node
     ports:
       - 127.0.0.1:8082:8080
     healthcheck:
@@ -159,3 +172,6 @@ services:
         condition: service_healthy
       nats-streams:
         condition: service_completed_successfully
+
+volumes:
+  issuer-key:
