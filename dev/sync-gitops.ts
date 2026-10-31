@@ -28,4 +28,6 @@ writeFileSync(
   `accounts: ${accounts.replace(/"<< (\$[A-Z_]+) >>"/g, "$1")}\n`,
 );
 
-console.log(`synced from gitops ${git("rev-parse", ref).trim()}`);
+const commit = git("rev-parse", ref).trim();
+writeFileSync(`${dev}gitops-commit`, `${commit}\n`);
+console.log(`synced from gitops ${commit}`);

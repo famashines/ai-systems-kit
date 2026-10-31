@@ -80,14 +80,28 @@ async function connect(url: string) {
   };
 }
 
-async function api(
-  path: string,
+async function request(
+  url: string,
   init: RequestInit = {},
-): Promise<{ status: number; body: unknown }> {
-  const response = await fetch(`${apiUrl}${path}`, init);
-  const text = await response.text();
-  return { status: response.status, body: text === "" ? undefined : JSON.parse(text) };
+): Promise<{ ok: boolean; status: number; body: unknown }> {
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(url, init);
+    text = await response.text();
+  } catch (error) {
+    fail(`cannot reach ${url}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let body: unknown = text;
+  try {
+    body = text === "" ? undefined : JSON.parse(text);
+  } catch {
+    body = text.slice(0, 200);
+  }
+  return { ok: response.ok, status: response.status, body };
 }
+
+const api = (path: string, init: RequestInit = {}) => request(`${apiUrl}${path}`, init);
 
 const rows: { step: string; result: "PASS" | "FAIL" | "SKIP"; detail: string }[] = [];
 async function step(name: string, run: () => Promise<string>): Promise<void> {
@@ -139,8 +153,13 @@ await step("GET /api/tasks with no token gives 401", async () => {
 });
 
 await step("token from the local issuer", async () => {
-  const response = await fetch(`${issuerUrl}/protocol/openid-connect/token`, { method: "POST" });
-  token = ((await response.json()) as { access_token: string }).access_token;
+  const url = `${issuerUrl}/protocol/openid-connect/token`;
+  const { ok, status, body } = await request(url, { method: "POST" });
+  const accessToken = (body as { access_token?: unknown } | undefined)?.access_token;
+  if (!ok || typeof accessToken !== "string") {
+    fail(`POST ${url} gave ${String(status)} ${JSON.stringify(body)}`);
+  }
+  token = accessToken;
   const [header, claims] = token
     .split(".")
     .slice(0, 2)
@@ -166,8 +185,8 @@ await step("subscribe tasks gives subscribed", async () => {
 });
 
 await step("snapshot GET /api/tasks after subscribed", async () => {
-  const { status, body } = await api("/api/tasks", { headers: auth() });
-  if (status !== 200) fail(`status ${String(status)} ${JSON.stringify(body)}`);
+  const { ok, status, body } = await api("/api/tasks", { headers: auth() });
+  if (!ok) fail(`GET ${apiUrl}/api/tasks gave ${String(status)} ${JSON.stringify(body)}`);
   return `${String((body as TaskList).items.length)} tasks, headSeq ${String((body as TaskList).headSeq)}`;
 });
 

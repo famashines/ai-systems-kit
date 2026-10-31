@@ -545,8 +545,12 @@ localhost:8080 /api --> api-gateway        socket-gateway <-- localhost:8081 /ws
 
 ### Quickstart in 10 minutes
 
-You need git, Docker with Compose v2, and Node 26. The workspace layout
-is fixed: the services are in `../services/ai-systems-<name>`.
+You need git, Docker, Docker Compose and Node 26. Tested versions:
+Docker 29.8.2 with Compose 5.6.0 (laptop), and the Docker and Compose of
+the GitHub `ubuntu-22.04` runner (the `e2e` job prints them). Older
+versions are not tested. Compose must support `up --wait` with one-shot
+services (`service_completed_successfully`). The workspace layout is
+fixed: the services are in `../services/ai-systems-<name>`.
 
 ```sh
 mkdir -p ai-systems/services && cd ai-systems
@@ -560,7 +564,8 @@ npm run dev:e2e
 npm run dev:down
 ```
 
-No `npm ci` is necessary: the scripts use only Node and Docker.
+`dev:up`, `dev:e2e` and `dev:down` need no `npm ci`: they use only Node
+and Docker. `dev:sync` imports `yaml`, so run `npm ci` before it.
 
 | Command            | Does                                                                                                            |
 | ------------------ | --------------------------------------------------------------------------------------------------------------- |
@@ -570,7 +575,10 @@ No `npm ci` is necessary: the scripts use only Node and Docker.
 | `npm run dev:sync` | copies the gitops sources again (see below); needs a gitops checkout                                            |
 
 Each `docker compose` command needs `--env-file .env.local`, for example
-`docker compose --env-file .env.local logs -f projections`.
+`docker compose --env-file .env.local logs -f projections`. Compose reads
+only `.env` for the `${...}` values in `compose.yaml`, and the passwords
+are in `.env.local` (a dev-only file that is not a general `.env`). With no
+`--env-file`, Compose stops with "run sh dev/env.sh".
 
 ### Ports
 
@@ -587,7 +595,9 @@ MongoDB, NATS, orchestration and projections have no host port. Use
 
 ### Tokens
 
-`dev/issuer/server.ts` has no dependencies. At start it makes an RSA key.
+`dev/issuer/server.ts` has no dependencies. At its first start it makes
+an RSA key and writes it to the volume `issuer-key`. A restart of the
+issuer uses the same key, so the tokens stay valid.
 It serves `/realms/ai-systems/.well-known/openid-configuration`, the JWKS
 at `/realms/ai-systems/protocol/openid-connect/certs` (the kit/auth
 default) and a token endpoint. Each `POST` to the token endpoint gives an
@@ -601,8 +611,14 @@ curl -s -H "authorization: Bearer $token" localhost:8080/api/tasks
 ```
 
 The gateways check the `iss` with the container name `issuer`, so the
-token is the same from the host and from a container. A new start of the
-issuer makes a new key: get a new token.
+token is the same from the host and from a container.
+
+A new key comes only with a new volume (`npm run dev:down` deletes it, and
+the gateways start again with it). If you delete only the volume
+`issuer-key` while the gateways run, the gateways refuse new tokens for up
+to 30 s: they fetch the JWKS again at most each 30 s for an unknown `kid`.
+Wait, or run `docker compose --env-file .env.local restart api-gateway
+socket-gateway`.
 
 ### Passwords
 
@@ -612,6 +628,16 @@ script does not change a file that exists, because the MongoDB root user
 keeps its first password in the volume. `npm run dev:down` deletes the
 volumes, so you can delete `.env.local` after it. The MongoDB key file is
 made again at each start of the container (one member does not share it).
+
+### Container hardening
+
+As in gitops: the four services, the issuer, MongoDB and NATS run as a
+user that is not root, with `cap_drop: [ALL]` and
+`no-new-privileges:true`. The services, the issuer and NATS also have a
+read-only root file system. MongoDB runs as `999` and writes its key file
+to `/tmp`, so it needs no `chown`. NATS runs as `1000`; its JetStream
+data is on a tmpfs, which a user that is not root can write. The one-shot
+jobs run as in gitops (`mongodb-init` as `999`, the `nonroot` nats-box).
 
 ### Sources from gitops
 
@@ -627,7 +653,8 @@ The local system uses the gitops files, not a copy written by hand:
 the gitops checkout at `../../../platform/gitops` (set `GITOPS_DIR` and
 `GITOPS_REF` to change it) and prints the gitops commit. It converts the
 account to NATS config JSON, and each `<< $NAME >>` password to the env
-var `$NAME`. The files are from gitops `13f559f`. gitops is private, so
+var `$NAME`. It writes the gitops commit that it used to
+`dev/gitops-commit`. gitops is private, so
 CI cannot read it: run the sync and commit the result when the grants or
 the streams change in gitops. ESLint and Prettier do not check these
 files, so they stay the same as in gitops.

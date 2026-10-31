@@ -1,4 +1,12 @@
-import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+} from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 
 const issuer = process.env.ISSUER ?? "http://issuer:8080/realms/ai-systems";
@@ -6,9 +14,28 @@ const clientId = process.env.CLIENT_ID ?? "ai-systems-app";
 const subject = process.env.SUBJECT ?? "4c0f3f1e-8f7a-4b6e-9d2a-1f5e7c3b9a10";
 const lifetimeSec = 3600;
 
-const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-const kid = randomUUID();
-const jwks = { keys: [{ ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" }] };
+const keyFile = process.env.KEY_FILE ?? "/home/node/issuer-key.pem";
+
+function loadKey(): string {
+  try {
+    return readFileSync(keyFile, "utf8");
+  } catch {
+    const { privateKey: pem } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      privateKeyEncoding: { format: "pem", type: "pkcs8" },
+      publicKeyEncoding: { format: "pem", type: "spki" },
+    });
+    writeFileSync(keyFile, pem, { mode: 0o600, flag: "wx" });
+    return pem;
+  }
+}
+
+const privateKey = createPrivateKey(loadKey());
+const publicJwk = createPublicKey(privateKey).export({ format: "jwk" });
+const kid = createHash("sha256")
+  .update(publicJwk.n ?? "")
+  .digest("base64url");
+const jwks = { keys: [{ ...publicJwk, kid, use: "sig", alg: "RS256" }] };
 
 const base64url = (value: object): string =>
   Buffer.from(JSON.stringify(value)).toString("base64url");

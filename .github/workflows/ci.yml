@@ -100,7 +100,10 @@ jobs:
 
       - name: Start the local system
         working-directory: kit
-        run: npm run dev:up
+        run: |
+          docker version --format 'Docker {{.Server.Version}}'
+          docker compose version
+          npm run dev:up
 
       - name: End to end
         working-directory: kit
