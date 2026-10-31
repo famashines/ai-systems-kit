@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
+
+- `./mongo`: `connectMongo` with retry and a `ping` readiness check, and
+  `runMigrations`.
+- `./event-store`: `createEventStore` on MongoDB with expected version,
+  command ids, `also` writes in the same transaction, positions,
+  `readStream`, `readAll`, upcasters and `eventStoreMigration`.
+- `./messaging`: `connectNats` with the service inbox prefix, the outbox
+  relay, the durable consumer with idempotency, backoff and the DLQ,
+  `processedMigration`, and rpc `request` and `serve`.
+- `./testing`: in-memory event store, `fakeClock`, `fakeIds`, `waitFor`,
+  `startMongo`, `startNats` and `createStreams`.
+- `./http`: `ErrorCode` comes from `@famashines/ai-systems-contracts`.
+- Review fixes: MongoDB or NATS outages and DLQ publish failures do not use
+  deliveries (the consumer keeps the message and tries again); the option
+  `ordered`; `serve` drops replies that are not in `allowReplyPrefixes`
+  (ADR 0025); events above 900 KiB give `payload_too_large`; relay metrics
+  `outbox_oldest_pending_seconds` and `outbox_publish_failures_total`;
+  logs and DLQ headers use `describeError`; `mongodb` is a peer dependency;
+  test images are pinned by digest.
+- A handler error counts as a delivery unless a ping to MongoDB or NATS
+  fails. New gauge `consumer_oldest_held_seconds`.
 
 - `./http`: before hooks run before routing. `DomainError` has `headers`.
   New codes `method_not_allowed`, `payload_too_large` and
