@@ -43,9 +43,11 @@ The kit installs `@famashines/ai-systems-contracts` (v0.1.0),
 `@nats-io/transport-node`, `@nats-io/jetstream` and `jose`. Peer dependencies: a
 service installs `mongodb` (7.8.0) and `zod` (4.6.7) itself, so that it and
 the kit use one copy (two copies break the `Db` and `ClientSession` types
-and `instanceof MongoServerError`). `testcontainers` is an optional peer
-dependency: install it as a dev dependency when you use `startMongo` or
-`startNats`.
+and `instanceof MongoServerError`). `mongodb` is an optional peer
+dependency: a service with no database (the gateways) does not install it
+and does not import `./mongo`, `./event-store` or `./messaging`.
+`testcontainers` is an optional peer dependency: install it as a dev
+dependency when you use `startMongo` or `startNats`.
 
 ## `./http`
 

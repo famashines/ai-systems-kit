@@ -11,6 +11,8 @@
   processed marker again before the handler runs again. If another pod
   processed the event during the outage, the consumer acks it and the
   handler does not run.
+- `mongodb` is an optional peer dependency, so the gateways do not install
+  it.
 
 ## 0.1.0
 
