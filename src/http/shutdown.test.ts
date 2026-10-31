@@ -115,6 +115,7 @@ test("closes open connections at the deadline and reports it", async () => {
   const hang = gate();
   const { service, url } = await start({
     shutdownTimeoutMs: 100,
+    hookBudgetMs: 50,
     routes: [
       {
         method: "GET",
@@ -132,7 +133,37 @@ test("closes open connections at the deadline and reports it", async () => {
   assert.equal(await service.close(), false);
   assert.ok(Date.now() - started < 1000);
   await assert.rejects(inFlight);
-  assert.ok(lines.some((line) => line.includes("shutdown deadline passed")));
+  assert.ok(lines.some((line) => line.includes("drain deadline passed")));
+});
+
+test("keeps the hook budget when a request runs to the drain deadline", async () => {
+  const hang = gate();
+  const done: string[] = [];
+  const hook = (name: string) => async () => {
+    await sleep(500);
+    done.push(name);
+  };
+  const { service, url } = await start({
+    shutdownTimeoutMs: 2500,
+    hookBudgetMs: 2000,
+    closeHooks: [hook("mongo"), hook("nats"), hook("telemetry")],
+    routes: [
+      {
+        method: "GET",
+        path: "/slow",
+        handler: async () => {
+          await hang.wait();
+          return {};
+        },
+      },
+    ],
+  });
+  const inFlight = fetch(`${url}/slow`).catch(() => undefined);
+  await hang.started;
+  assert.equal(await service.close(), false);
+  await inFlight;
+  assert.deepEqual(done, ["telemetry", "nats", "mongo"]);
+  assert.ok(!lines.some((line) => line.includes("did not end before the shutdown deadline")));
 });
 
 test("bounds a close hook that hangs with a live handle and runs the others", async () => {
@@ -140,6 +171,7 @@ test("bounds a close hook that hangs with a live handle and runs the others", as
   let handle: NodeJS.Timeout | undefined;
   const { service } = await start({
     shutdownTimeoutMs: 100,
+    hookBudgetMs: 100,
     closeHooks: [
       () => {
         order.push("first");
@@ -190,6 +222,7 @@ test("exits with 1 when a hook awaits a promise with no handle", async () => {
       logger: pino({ level: "silent" }),
       drainDelayMs: 0,
       shutdownTimeoutMs: 200,
+      hookBudgetMs: 200,
       closeHooks: [
         () => { console.log("first hook"); },
         () => new Promise(() => {}),

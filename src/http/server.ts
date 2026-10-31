@@ -30,6 +30,7 @@ export interface ServiceOptions {
   readinessTimeoutMs?: number;
   drainDelayMs?: number;
   shutdownTimeoutMs?: number;
+  hookBudgetMs?: number;
 }
 
 export interface Service {
@@ -175,6 +176,7 @@ export function createService(options: ServiceOptions): Service {
     readinessTimeoutMs = 2000,
     drainDelayMs = 5000,
     shutdownTimeoutMs = 19_000,
+    hookBudgetMs = 4000,
   } = options;
   const route = createRouter(options.routes);
   const active = new Set<ServerResponse>();
@@ -328,19 +330,33 @@ export function createService(options: ServiceOptions): Service {
   );
   server.maxHeadersCount = 100;
 
+  const deadline = (ms: number): { expired: Promise<"expired">; clear: () => void } => {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"expired">((resolve) => {
+      timer = setTimeout(
+        () => {
+          resolve("expired");
+        },
+        Math.max(0, ms),
+      );
+    });
+    return {
+      expired,
+      clear: () => {
+        clearTimeout(timer);
+      },
+    };
+  };
+
   async function shutdown(): Promise<boolean> {
     state = "draining";
     for (const response of active) {
       if (!response.headersSent) response.setHeader("connection", "close");
     }
-    let timer: NodeJS.Timeout | undefined;
-    const expired = new Promise<"expired">((resolve) => {
-      timer = setTimeout(() => {
-        resolve("expired");
-      }, shutdownTimeoutMs);
-    });
+    const drain = deadline(shutdownTimeoutMs - hookBudgetMs);
+    const end = deadline(shutdownTimeoutMs);
     let clean = true;
-    await Promise.race([sleep(drainDelayMs), expired]);
+    await Promise.race([sleep(drainDelayMs), drain.expired]);
     state = "closing";
     const closed = new Promise<void>((resolve) => {
       server.close(() => {
@@ -348,11 +364,12 @@ export function createService(options: ServiceOptions): Service {
       });
     });
     server.closeIdleConnections();
-    if ((await Promise.race([closed, expired])) === "expired") {
-      logger.error("shutdown deadline passed, closing open connections");
+    if ((await Promise.race([closed, drain.expired])) === "expired") {
+      logger.error("drain deadline passed, closing open connections");
       server.closeAllConnections();
       clean = false;
     }
+    drain.clear();
     for (const hook of [...closeHooks].reverse()) {
       const run = Promise.resolve()
         .then(hook)
@@ -363,12 +380,13 @@ export function createService(options: ServiceOptions): Service {
             return false;
           },
         );
-      const result = await Promise.race([run, expired]);
-      if (result === "expired")
+      const result = await Promise.race([run, end.expired]);
+      if (result === "expired") {
         logger.error("a close hook did not end before the shutdown deadline");
+      }
       if (result !== true) clean = false;
     }
-    clearTimeout(timer);
+    end.clear();
     return clean;
   }
 
