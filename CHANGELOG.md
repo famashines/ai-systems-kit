@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.1.0
+
+- `./mongo`: `connectMongo` with retry and a `ping` readiness check, and
+  `runMigrations`.
+- `./event-store`: `createEventStore` on MongoDB with expected version,
+  command ids, `also` writes in the same transaction, positions,
+  `readStream`, `readAll`, upcasters and `eventStoreMigration`.
+- `./messaging`: `connectNats` with the service inbox prefix, the outbox
+  relay, the durable consumer with idempotency, backoff and the DLQ,
+  `processedMigration`, and rpc `request` and `serve`.
+- `./testing`: in-memory event store, `fakeClock`, `fakeIds`, `waitFor`,
+  `startMongo`, `startNats` and `createStreams`.
+- `./http`: `ErrorCode` comes from `@famashines/ai-systems-contracts`.
 
 - `./http`: before hooks run before routing. `DomainError` has `headers`.
   New codes `method_not_allowed`, `payload_too_large` and

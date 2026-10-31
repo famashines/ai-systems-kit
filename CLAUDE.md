@@ -5,20 +5,34 @@ Rules for all ai-systems repos: `ai-systems-docs/CLAUDE.md`
 
 ## Commands
 
-| Command          | Does                                                          |
-| ---------------- | ------------------------------------------------------------- |
-| `npm ci`         | install from the lock file, then build `dist/`                |
-| `npm run build`  | `tsc` (TypeScript 7) to `dist/`                               |
-| `npm run check`  | `tsc --noEmit` (TypeScript 7)                                 |
-| `npm run lint`   | ESLint (strict type-checked) and Prettier check               |
-| `npm test`       | `node --test` with the coverage gate: 90% lines, 85% branches |
-| `npm run verify` | check, lint and test                                          |
+| Command                    | Does                                                          |
+| -------------------------- | ------------------------------------------------------------- |
+| `npm ci`                   | install from the lock file, then build `dist/`                |
+| `npm run build`            | `tsc` (TypeScript 7) to `dist/`                               |
+| `npm run check`            | `tsc --noEmit` (TypeScript 7)                                 |
+| `npm run lint`             | ESLint (strict type-checked) and Prettier check               |
+| `npm test`                 | `node --test` with the coverage gate: 90% lines, 85% branches |
+| `npm run verify`           | check, lint and test                                          |
+| `npm run test:integration` | `*.integration.ts` with Testcontainers (needs Docker)         |
 
 ## Layout
 
 One folder for each subpath export in `src/`, with an `index.ts`. Tests are
 `*.test.ts` next to the code. Add a new export to `exports` in
 `package.json`.
+
+Code that needs MongoDB or NATS is in `*.io.ts` files. The unit coverage
+gate does not include them. The integration tests (`*.integration.ts`,
+not in `dist/`) cover them. Keep logic that needs no container in other
+files, with unit tests.
+
+## Integration tests
+
+Each `*.integration.ts` file starts its own containers in `before` and
+stops them in `after`. Wait for conditions with `waitFor`, never with a
+fixed sleep. Close each relay and consumer, also when a test fails, else
+the process does not stop. `messaging.integration.ts` runs with the
+ADR 0023 grants of a test user `worker`.
 
 ## TypeScript 6 and 7
 
