@@ -7,6 +7,7 @@ Reasons and the dependency list: ADR 0003, 0004, 0017 and 0018 in
 ```
 @famashines/ai-systems-kit
 ├── ./http           server on node:http, router, body, zod, problem JSON, ids, health, ready, shutdown
+├── ./auth           JWT check of Keycloak access tokens with jose, bearer hook for ./http
 ├── ./config         env vars checked with zod at start
 ├── ./observability  pino logger with redaction, OpenTelemetry traces and metrics
 ├── ./mongo          MongoDB connect with retry, ping readiness, migrations
@@ -18,7 +19,7 @@ Reasons and the dependency list: ADR 0003, 0004, 0017 and 0018 in
 ## Install
 
 ```sh
-npm install github:famashines/ai-systems-kit#v0.1.0
+npm install github:famashines/ai-systems-kit#v0.2.0
 ```
 
 npm builds `dist/` with the `prepare` script on install. npm 11 asks for
@@ -39,7 +40,7 @@ installs `testcontainers` also adds `"ssh2": false` and
 `"cpu-features": false` (optional native parts that the tests do not use).
 
 The kit installs `@famashines/ai-systems-contracts` (v0.1.0),
-`@nats-io/transport-node` and `@nats-io/jetstream`. Peer dependencies: a
+`@nats-io/transport-node`, `@nats-io/jetstream` and `jose`. Peer dependencies: a
 service installs `mongodb` (7.8.0) and `zod` (4.6.7) itself, so that it and
 the kit use one copy (two copies break the `Db` and `ClientSession` types
 and `instanceof MongoServerError`). `testcontainers` is an optional peer
@@ -111,6 +112,64 @@ dependency: install it as a dev dependency when you use `startMongo` or
 
 - `close()` also waits `drainDelayMs` (5 s by default). Tests pass
   `drainDelayMs: 0`.
+
+## `./auth`
+
+The JWT check of ADR 0009 and ADR 0021, for both gateways.
+
+```ts
+import { bearerHook, createJwtVerifier, subjectOf } from "@famashines/ai-systems-kit/auth";
+
+const verify = createJwtVerifier({
+  issuer: "https://auth.famashines.com/realms/ai-systems",
+  audience: "ai-systems-app",
+  requiredRole: "owner",
+});
+const app = createService({ before: [bearerHook(verify)], routes, logger });
+const handler: Handler = (request) => ({ body: { sub: subjectOf(request).sub } });
+const subject = await verify(token);
+```
+
+- `createJwtVerifier({ issuer, audience, requiredRole, jwksUrl?, clockToleranceSec? })`
+  gives `verify(token)`, which gives the subject `{ sub, roles, exp }`.
+  `jwksUrl` is `<issuer>/protocol/openid-connect/certs` by default.
+  `clockToleranceSec` is 30 by default.
+- `verify` does not need HTTP. socket-gateway calls it with the token of
+  `hello`.
+- The checks:
+
+  | Check                                                          | Failure |
+  | -------------------------------------------------------------- | ------- |
+  | token length at most 8192                                      | 401     |
+  | `alg` is `RS256` (no `none`, no HMAC, no other algorithm)      | 401     |
+  | signature with a key of the JWKS, by `kid`                     | 401     |
+  | `iss` is the issuer                                            | 401     |
+  | `aud` is the audience or an array that has it                  | 401     |
+  | `exp` and `nbf` (with the tolerance)                           | 401     |
+  | `sub`, `exp` and `iat` are present; `iat` is not in the future | 401     |
+  | `typ` is `Bearer` (a Keycloak access token, not an ID token)   | 401     |
+  | `realm_access.roles` has the role                              | 403     |
+  | the JWKS cannot be read (error, timeout, bad answer)           | 503     |
+
+- 401 is `UnauthorizedError` with
+  `WWW-Authenticate: Bearer realm="ai-systems", error="invalid_token"`.
+  403 is `ForbiddenError` with `error="insufficient_scope"`. 503 is
+  `UnavailableError`: a Keycloak outage is not a bad token, so the app
+  does not sign out.
+- The JWKS (jose `createRemoteJWKSet`) is kept for 10 minutes. A token with
+  an unknown `kid` causes one new fetch, but at most one fetch each 30
+  seconds. So a key rotation in Keycloak works with no restart, and tokens
+  with random `kid` values cannot flood Keycloak. Each fetch has a 5 second
+  timeout. The first fetch is at the first token, not at start.
+- `bearerHook(verify)` is a `before` hook of `./http`. It accepts only
+  `Authorization: Bearer <token>` (that case, one space, at most 8192
+  characters, token characters of RFC 6750). It puts the subject in
+  `request.state.subject`. `subjectOf(request)` gives it with its type.
+  The hook runs before routing, so a request with no valid token gets 401
+  on all paths, also on paths that do not exist. `/health`, `/ready` and
+  `/metrics` have no hooks, so they stay open.
+- No token or another scheme gives 401 with
+  `WWW-Authenticate: Bearer realm="ai-systems"` and no error (RFC 6750).
 
 ## `./config`
 

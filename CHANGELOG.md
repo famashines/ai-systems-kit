@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+- `./auth`: `createJwtVerifier` checks Keycloak access tokens with `jose`
+  (RS256 only, `iss`, `aud`, `exp`, `nbf`, `iat`, `typ`, realm role) against
+  the remote JWKS with cache, rotation and a refetch cooldown. 401, 403 and
+  503 (JWKS not available) are `DomainError`s with `WWW-Authenticate`.
+  `bearerHook` for `./http` and `subjectOf`.
+- `./messaging`: after a MongoDB or NATS outage, the consumer checks the
+  processed marker again before the handler runs again. If another pod
+  processed the event during the outage, the consumer acks it and the
+  handler does not run.
+
 ## 0.1.0
 
 - `./mongo`: `connectMongo` with retry and a `ping` readiness check, and

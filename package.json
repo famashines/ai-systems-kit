@@ -1,8 +1,8 @@
 {
   "name": "@famashines/ai-systems-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Shared server code for ai-systems services: http, config, observability, mongo, event store, messaging, testing",
+  "description": "Shared server code for ai-systems services: http, auth, config, observability, mongo, event store, messaging, testing",
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
@@ -19,6 +19,10 @@
     "./http": {
       "types": "./dist/http/index.d.ts",
       "default": "./dist/http/index.js"
+    },
+    "./auth": {
+      "types": "./dist/auth/index.d.ts",
+      "default": "./dist/auth/index.js"
     },
     "./config": {
       "types": "./dist/config/index.d.ts",
@@ -66,6 +70,7 @@
     "@opentelemetry/instrumentation-undici": "0.34.0",
     "@opentelemetry/resources": "3.0.0",
     "@opentelemetry/sdk-node": "0.300.0",
+    "jose": "6.2.14",
     "pino": "10.4.0"
   },
   "devDependencies": {
