@@ -643,6 +643,10 @@ services start only after both end with exit code 0.
   cluster has it too. It does not stop the script.
 - The system has no LLM, budget or conversation services yet (M1). The
   e2e checks the task submit, the read model, the notices and the resume.
+- The service images install kit and contracts from the git tags in their
+  own `package.json`, not from this folder. So the local system and the
+  `e2e` job check the services at `main` with the kit tags they use, not
+  the kit changes of a branch.
 - The first `npm run dev:up` builds four images and downloads the base
   images. Later starts use the Docker build cache.
 
