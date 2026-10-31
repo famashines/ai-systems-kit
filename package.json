@@ -1,8 +1,8 @@
 {
   "name": "@famashines/ai-systems-kit",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Shared server code for ai-systems services: http, config, observability",
+  "description": "Shared server code for ai-systems services: http, config, observability, mongo, event store, messaging, testing",
   "license": "UNLICENSED",
   "repository": {
     "type": "git",
@@ -27,6 +27,22 @@
     "./observability": {
       "types": "./dist/observability/index.d.ts",
       "default": "./dist/observability/index.js"
+    },
+    "./mongo": {
+      "types": "./dist/mongo/index.d.ts",
+      "default": "./dist/mongo/index.js"
+    },
+    "./event-store": {
+      "types": "./dist/event-store/index.d.ts",
+      "default": "./dist/event-store/index.js"
+    },
+    "./messaging": {
+      "types": "./dist/messaging/index.d.ts",
+      "default": "./dist/messaging/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing/index.d.ts",
+      "default": "./dist/testing/index.js"
     }
   },
   "scripts": {
@@ -35,10 +51,14 @@
     "check": "node node_modules/typescript-7/bin/tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
-    "test": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' 'src/**/*.test.ts'",
-    "verify": "npm run check && npm run lint && npm test"
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' --test-coverage-exclude='src/**/*.io.ts' 'src/**/*.test.ts'",
+    "verify": "npm run check && npm run lint && npm test",
+    "test:integration": "node --test --test-timeout=300000 'src/**/*.integration.ts'"
   },
   "dependencies": {
+    "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.1.0",
+    "@nats-io/jetstream": "3.4.0",
+    "@nats-io/transport-node": "3.4.0",
     "@opentelemetry/api": "1.10.0",
     "@opentelemetry/exporter-prometheus": "0.300.0",
     "@opentelemetry/exporter-trace-otlp-proto": "0.300.0",
@@ -46,22 +66,33 @@
     "@opentelemetry/instrumentation-undici": "0.34.0",
     "@opentelemetry/resources": "3.0.0",
     "@opentelemetry/sdk-node": "0.300.0",
+    "mongodb": "7.8.0",
     "pino": "10.4.0"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
     "eslint": "10.14.0",
     "prettier": "3.9.10",
+    "testcontainers": "12.2.1",
     "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-7": "npm:typescript@7.0.2",
     "typescript-eslint": "8.72.1",
     "zod": "4.6.7"
   },
   "allowScripts": {
-    "protobufjs": false
+    "protobufjs": false,
+    "github:famashines/ai-systems-contracts#09f6c8c5385e90dd96cdc81fbd5c8c44d7e92257": true,
+    "ssh2": false,
+    "cpu-features": false
   },
   "peerDependencies": {
+    "testcontainers": "^12.2.1",
     "zod": "^4.6.7"
+  },
+  "peerDependenciesMeta": {
+    "testcontainers": {
+      "optional": true
+    }
   },
   "overrides": {
     "@typescript/old": "npm:typescript@6.0.3"

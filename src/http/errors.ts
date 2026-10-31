@@ -1,16 +1,6 @@
-export type ErrorCode =
-  | "validation_failed"
-  | "not_found"
-  | "conflict"
-  | "unauthorized"
-  | "forbidden"
-  | "rate_limited"
-  | "internal"
-  | "unavailable"
-  | "budget_refused"
-  | "method_not_allowed"
-  | "payload_too_large"
-  | "unsupported_media_type";
+import type { ErrorCode } from "@famashines/ai-systems-contracts";
+
+export type { ErrorCode };
 
 export type ErrorHeaders = Readonly<Record<string, string>>;
 
