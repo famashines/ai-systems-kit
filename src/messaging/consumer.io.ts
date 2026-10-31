@@ -1,7 +1,13 @@
 import type { EventEnvelopeV1, RegisteredEvent } from "@famashines/ai-systems-contracts";
 import { jetstream, type Consumer, type ConsumerMessages, type JsMsg } from "@nats-io/jetstream";
 import { headers } from "@nats-io/transport-node";
-import { context, propagation, ROOT_CONTEXT } from "@opentelemetry/api";
+import {
+  context,
+  metrics,
+  propagation,
+  ROOT_CONTEXT,
+  type ObservableResult,
+} from "@opentelemetry/api";
 import type { ClientSession, Db } from "mongodb";
 import { rules, type Parse, type Upcasters } from "../event-store/rules.ts";
 import type { CloseHook, ReadinessCheck } from "../http/server.ts";
@@ -67,6 +73,33 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
   const timing = pauser();
   let consumer: Consumer | undefined;
   let messages: ConsumerMessages | undefined;
+  const held = new Map<JsMsg, number>();
+  const oldestHeld = metrics
+    .getMeter("ai-systems-kit")
+    .createObservableGauge("consumer_oldest_held_seconds", {
+      description: "Age of the oldest message that the consumer holds and did not ack yet",
+    });
+  const observe = (result: ObservableResult): void => {
+    const since = Math.min(...held.values());
+    result.observe(held.size === 0 ? 0 : (Date.now() - since) / 1000, { stream, durable });
+  };
+  oldestHeld.addCallback(observe);
+
+  async function healthy(): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<boolean>((resolve) => {
+      timer = setTimeout(resolve, 2000, false);
+    });
+    const check = Promise.all([db.command({ ping: 1 }), nats.connection.rtt()]).then(
+      () => true,
+      () => false,
+    );
+    try {
+      return await Promise.race([check, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function create(): Promise<Consumer> {
     const config = {
@@ -91,12 +124,16 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
   const isProcessed = async (eventId: string): Promise<boolean> =>
     (await processed.findOne({ _id: eventId })) !== null;
 
-  async function retrying<T>(what: string, work: () => Promise<T>, always = false): Promise<T> {
+  async function retrying<T>(
+    what: string,
+    work: () => Promise<T>,
+    again: (error: unknown) => boolean | Promise<boolean>,
+  ): Promise<T> {
     for (let failures = 1; ; failures += 1) {
       try {
         return await work();
       } catch (error) {
-        if (timing.stopped || !(always || isInfrastructure(error))) throw error;
+        if (timing.stopped || !(await again(error))) throw error;
         const delayMs = backoff(failures);
         if (failures === 1 || delayMs === backoffCapMs) {
           logger.error(
@@ -117,7 +154,11 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
     }
     for (const [name, value] of Object.entries(dlqHeaders(error))) meta.set(name, value);
     const subject = `dlq.${durable}.${message.subject}`;
-    await retrying("DLQ publish", () => js.publish(subject, message.data, { headers: meta }), true);
+    await retrying(
+      "DLQ publish",
+      () => js.publish(subject, message.data, { headers: meta }),
+      () => true,
+    );
     message.ack();
     logger.error(
       {
@@ -157,10 +198,28 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
       await deadLetter(message, error);
       return;
     }
-    const seen = () => retrying("processed check", () => isProcessed(event.eventId));
+    const seen = () =>
+      retrying("processed check", () => isProcessed(event.eventId), isInfrastructure);
+    const runHeld = async (): Promise<void> => {
+      for (;;) {
+        try {
+          await run(message, event);
+          return;
+        } catch (error) {
+          if (timing.stopped || (await healthy())) throw error;
+          await retrying(
+            "MongoDB and NATS health",
+            async () => {
+              if (!(await healthy())) throw error;
+            },
+            () => true,
+          );
+        }
+      }
+    };
     for (let attempt = message.info.deliveryCount; ; attempt += 1) {
       try {
-        if (!(await seen())) await retrying("handler", () => run(message, event));
+        if (!(await seen())) await runHeld();
         message.ack();
         return;
       } catch (error) {
@@ -190,17 +249,16 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
   async function pull(from: Consumer): Promise<void> {
     messages = await from.fetch({ max_messages: options.batch ?? 10, expires: 5000 });
     if (timing.stopped) await messages.close();
-    const held = new Set<JsMsg>();
     const timer = setInterval(
       () => {
-        for (const message of held) message.working();
+        for (const message of held.keys()) message.working();
       },
       Math.max(10, (backoffMs[0] ?? 1000) / 3),
     );
     let chain = Promise.resolve();
     try {
       for await (const message of messages) {
-        held.add(message);
+        held.set(message, Date.now());
         chain = chain
           .then(() => handle(message))
           .catch((error: unknown) => {
@@ -247,6 +305,7 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
     },
     close: async () => {
       timing.stop();
+      oldestHeld.removeCallback(observe);
       await messages?.close();
       await loop;
     },

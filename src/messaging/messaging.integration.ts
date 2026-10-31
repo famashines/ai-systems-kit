@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { connect, createServer, type AddressInfo, type Server, type Socket } from "node:net";
-import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { after, before, describe, test } from "node:test";
 import { EventEnvelopeV1, TaskSubmittedEventPayloadV1 } from "@famashines/ai-systems-contracts";
@@ -12,14 +12,14 @@ import {
   type StoredMsg,
 } from "@nats-io/jetstream";
 import { headers } from "@nats-io/transport-node";
-import type { ClientSession, Db, MongoClient } from "mongodb";
+import { MongoNetworkError, type ClientSession, type Db, type MongoClient } from "mongodb";
 import { pino } from "pino";
 import { z } from "zod";
 import { createEventStore, eventStoreMigration } from "../event-store/index.ts";
 import { DomainError } from "../http/errors.ts";
 import type { CloseHook } from "../http/server.ts";
 import { connectMongo, runMigrations } from "../mongo/index.ts";
-import { startTelemetry } from "../observability/index.ts";
+import { startTelemetry, type Telemetry } from "../observability/index.ts";
 import { createStreams, startMongo, startNats, waitFor, type Started } from "../testing/index.ts";
 import { connectNats, processedMigration, startConsumer, startRelay, type Nats } from "./index.ts";
 
@@ -86,8 +86,21 @@ let db: Db;
 let admin: Nats;
 let worker: Nats;
 let manager: JetStreamManager;
+let telemetry: Telemetry;
+let scrape: HttpServer;
+let metricsUrl: string;
+
+const metric = async (name: string): Promise<number> => {
+  const text = await (await fetch(metricsUrl)).text();
+  const pattern = new RegExp(`^${name}(?:\\{[^}]*\\})? (\\S+)$`, "gm");
+  return Math.max(0, ...[...text.matchAll(pattern)].map((match) => Number(match[1])));
+};
 
 before(async () => {
+  telemetry = startTelemetry({ serviceName: "worker", release: "test" });
+  scrape = createHttpServer(telemetry.metricsHandler);
+  await new Promise<void>((resolve) => scrape.listen(0, "127.0.0.1", resolve));
+  metricsUrl = `http://127.0.0.1:${String((scrape.address() as AddressInfo).port)}/metrics`;
   [mongo, nats] = await Promise.all([startMongo(), startNats({ config })]);
   ({ client, db } = await connectMongo({ url: mongo.url, database: "messaging" }));
   await runMigrations(db, [eventStoreMigration, processedMigration]);
@@ -112,6 +125,8 @@ after(async () => {
   await Promise.all(running.map(async (item) => item.close()));
   await Promise.all([admin.close(), worker.close(), client.close()]);
   await Promise.all([mongo.stop(), nats.stop()]);
+  await new Promise((resolve) => scrape.close(resolve));
+  await telemetry.shutdown();
 });
 
 const envelope = (overrides: Partial<EventEnvelopeV1> = {}): EventEnvelopeV1 => {
@@ -299,10 +314,6 @@ describe("outbox relay", () => {
 
 describe("stuck outbox", () => {
   test("the relay logs errors, counts failures and shows the age of the oldest event", async () => {
-    const telemetry = startTelemetry({ serviceName: "worker", release: "test" });
-    const scrape = createHttpServer(telemetry.metricsHandler);
-    await new Promise<void>((resolve) => scrape.listen(0, "127.0.0.1", resolve));
-    const url = `http://127.0.0.1:${String((scrape.address() as AddressInfo).port)}/metrics`;
     const lines: string[] = [];
     const watched = await connectNats({
       servers: nats.url,
@@ -329,18 +340,11 @@ describe("stuck outbox", () => {
       ],
     });
     const relay = startRelay({ store, nats: watched, streams: ["ORCHESTRATION"] });
-    const value = async (name: string): Promise<number> => {
-      const text = await (await fetch(url)).text();
-      const match = new RegExp(`^${name}(?:\\{[^}]*\\})? (\\S+)$`, "m").exec(text);
-      return Number(match?.[1] ?? 0);
-    };
-    await waitFor(async () => (await value("outbox_publish_failures_total")) >= 1);
-    await waitFor(async () => (await value("outbox_oldest_pending_seconds")) > 0);
+    await waitFor(async () => (await metric("outbox_publish_failures_total")) >= 1);
+    await waitFor(async () => (await metric("outbox_oldest_pending_seconds")) > 0);
     assert.equal(await relay.ready(), true);
     await relay.close();
     await watched.close();
-    await new Promise((resolve) => scrape.close(resolve));
-    await telemetry.shutdown();
     const failed = lines.map(
       (line) => JSON.parse(line) as { msg: string; error?: { errorClass: string } },
     );
@@ -524,6 +528,80 @@ describe("durable consumer", () => {
     );
   });
 
+  test("a handler that throws a MongoNetworkError by its own bug: DLQ after 5 tries, later messages go on", async () => {
+    const bad = envelope();
+    const later = [envelope(), envelope(), envelope()];
+    let badCalls = 0;
+    const consumer = await consume(async (received, { session, markProcessed }) => {
+      if (received.eventId === bad.eventId) {
+        badCalls += 1;
+        throw new MongoNetworkError("a bug that looks like a network error");
+      }
+      await session.withTransaction(() => markProcessed(session));
+    });
+    await publish(bad.type, JSON.stringify(bad));
+    for (const event of later) await publish(event.type, JSON.stringify(event));
+    await waitFor(
+      async () =>
+        (await processed().countDocuments({
+          _id: { $in: later.map((event) => event.eventId) },
+        })) === 3,
+    );
+    await waitFor(async () =>
+      (await subjectMessages("DLQ", "dlq.worker.orchestration.TaskSubmitted")).some(
+        (message) => message.json<EventEnvelopeV1>().eventId === bad.eventId,
+      ),
+    );
+    await waitFor(drained);
+    await consumer.close();
+    assert.equal(badCalls, 5);
+  });
+
+  test("MongoDB cut while the handler runs: the handler runs again later, with no new delivery", async () => {
+    const target = new URL(mongo.url);
+    const gate = await tcpGate(target.hostname, Number(target.port));
+    const proxied = await connectMongo({
+      url: `mongodb://127.0.0.1:${String(gate.port)}/?directConnection=true`,
+      database: "messaging",
+      clientOptions: { serverSelectionTimeoutMS: 500 },
+    });
+    track({ close: () => proxied.close() });
+    const event = envelope();
+    let calls = 0;
+    const consumer = track(
+      startConsumer({
+        nats: worker,
+        db: proxied.db,
+        stream: "ORCHESTRATION",
+        filter: "orchestration.TaskSubmitted",
+        backoffMs: fast,
+        handler: async (received, { session, markProcessed }) => {
+          calls += 1;
+          if (calls === 1) await gate.cut();
+          await session.withTransaction(async () => {
+            await proxied.db
+              .collection<{ _id: string }>("effects")
+              .insertOne({ _id: received.eventId }, { session });
+            await markProcessed(session);
+          });
+        },
+      }),
+    );
+    await waitFor(() => consumer.ready());
+    const before = await deliveries();
+    await publish(event.type, JSON.stringify(event));
+    await waitFor(() => calls === 1);
+    await sleep(3000);
+    assert.equal(calls, 1);
+    await gate.open();
+    await waitFor(async () => (await effects().countDocuments({ _id: event.eventId })) === 1);
+    await waitFor(drained);
+    await consumer.close();
+    await gate.close();
+    assert.equal(calls, 2);
+    assert.equal((await deliveries()) - before, 1);
+  });
+
   test("a DLQ publish that fails for a while: the message is in the DLQ later", async () => {
     await manager.streams.delete("DLQ");
     const event = envelope();
@@ -534,7 +612,7 @@ describe("durable consumer", () => {
     });
     await publish(event.type, JSON.stringify(event));
     await waitFor(() => calls === 5);
-    await sleep(1500);
+    await waitFor(async () => (await metric("consumer_oldest_held_seconds")) > 1);
     await createStreams(admin.connection, [{ name: "DLQ", subjects: ["dlq.>"] }]);
     await waitFor(async () =>
       (await subjectMessages("DLQ", "dlq.worker.orchestration.TaskSubmitted")).some(
@@ -542,6 +620,7 @@ describe("durable consumer", () => {
       ),
     );
     await waitFor(drained);
+    await waitFor(async () => (await metric("consumer_oldest_held_seconds")) === 0);
     await consumer.close();
     assert.equal(calls, 5);
   });

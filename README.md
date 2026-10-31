@@ -302,15 +302,28 @@ const consumer = startConsumer({
     fails, delivery 5         --> DLQ, ack after the DLQ PubAck
   ```
 
-- MongoDB or NATS down: a `MongoNetworkError`, `MongoServerSelectionError`
-  (and `PoolClearedError`), a NATS timeout, no responders or connection
-  error, or a socket error (`ECONNRESET`, `EPIPE` ...) does not use a
-  delivery. The kit keeps the message, sends "in progress", and tries
-  again after 1, 2, 4 ... 30 s until MongoDB or NATS is back. It logs an
-  error at the first failure and each 30 s. Only other handler errors count
-  as deliveries.
-- The DLQ publish also tries again until it works. The kit acks the
-  message only after the DLQ PubAck.
+- MongoDB or NATS down, in the kit calls (the `processed` check): a
+  `MongoNetworkError`, `MongoServerSelectionError` (and
+  `PoolClearedError`), a NATS timeout, no responders or connection error,
+  or a socket error (`ECONNRESET`, `EPIPE` ...) does not use a delivery.
+  The kit keeps the message, sends "in progress", and tries again after 1,
+  2, 4 ... 30 s. It logs an error at the first failure and each 30 s.
+- A handler error: the kit does not look at the error class. It sends
+  `ping` to the consumer `db` and a NATS ping, with a 2 s limit. If one of
+  them fails, MongoDB or NATS is down: the kit keeps the message, waits
+  until both answer again, and then runs the handler again (no new
+  delivery). If both answer, the error is a handler failure and counts as
+  a delivery (nak with the backoff, or the ordered local retry, then the
+  DLQ after 5 tries). So a handler bug that throws an error which looks
+  like a network error still goes to the DLQ.
+- The DLQ publish tries again until it works. The kit acks the message
+  only after the DLQ PubAck.
+- Held messages: the gauge `consumer_oldest_held_seconds` (labels `stream`,
+  `durable`) gives the age of the oldest message that the consumer has and
+  did not ack yet, 0 when it has none. A DLQ publish that fails for a
+  permanent reason (for example no permission on `dlq.<service>.>`) keeps
+  a message for ever with only this signal. Each service needs an alert on
+  the gauge, for example above 300 s.
 - At least once: a message can come more than one time, for example after
   a crash before the ack. So the handler writes its effect and
   `markProcessed(session)` in one transaction: with

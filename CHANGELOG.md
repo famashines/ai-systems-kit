@@ -20,6 +20,8 @@
   `outbox_oldest_pending_seconds` and `outbox_publish_failures_total`;
   logs and DLQ headers use `describeError`; `mongodb` is a peer dependency;
   test images are pinned by digest.
+- A handler error counts as a delivery unless a ping to MongoDB or NATS
+  fails. New gauge `consumer_oldest_held_seconds`.
 
 - `./http`: before hooks run before routing. `DomainError` has `headers`.
   New codes `method_not_allowed`, `payload_too_large` and
