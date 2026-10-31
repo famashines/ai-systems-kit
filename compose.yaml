@@ -12,7 +12,6 @@ x-node-ready: &node-ready
 
 x-service: &service
   read_only: true
-  restart: unless-stopped
   healthcheck: *node-ready
 
 services:
