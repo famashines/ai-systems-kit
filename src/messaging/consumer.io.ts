@@ -7,7 +7,15 @@ import { rules, type Parse, type Upcasters } from "../event-store/rules.ts";
 import type { CloseHook, ReadinessCheck } from "../http/server.ts";
 import type { Migration } from "../mongo/migrations.io.ts";
 import type { Nats } from "./connect.io.ts";
-import { backoff, consumerBackoffMs, dlqHeaders, onFailure } from "./failures.ts";
+import {
+  backoff,
+  backoffCapMs,
+  consumerBackoffMs,
+  describeError,
+  dlqHeaders,
+  isInfrastructure,
+  onFailure,
+} from "./failures.ts";
 import { pauser } from "./pause.ts";
 
 export interface HandlerContext {
@@ -27,6 +35,7 @@ export interface ConsumerOptions<E extends EventEnvelopeV1> {
   parse?: Parse<E>;
   batch?: number;
   backoffMs?: readonly number[];
+  ordered?: boolean;
 }
 
 export interface DurableConsumer {
@@ -49,6 +58,7 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
   options: ConsumerOptions<E>,
 ): DurableConsumer {
   const { nats, db, stream, filter, handler } = options;
+  const ordered = options.ordered ?? false;
   const { logger, service: durable } = nats;
   const backoffMs = options.backoffMs ?? consumerBackoffMs;
   const { decode } = rules(options);
@@ -65,6 +75,7 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
       ack_policy: "explicit",
       deliver_policy: "all",
       max_deliver: backoffMs.length + 1,
+      max_ack_pending: ordered ? 1 : 1000,
       backoff: backoffMs.map((ms) => ms * 1_000_000),
     };
     const reply = await nats.connection.request(
@@ -80,6 +91,24 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
   const isProcessed = async (eventId: string): Promise<boolean> =>
     (await processed.findOne({ _id: eventId })) !== null;
 
+  async function retrying<T>(what: string, work: () => Promise<T>, always = false): Promise<T> {
+    for (let failures = 1; ; failures += 1) {
+      try {
+        return await work();
+      } catch (error) {
+        if (timing.stopped || !(always || isInfrastructure(error))) throw error;
+        const delayMs = backoff(failures);
+        if (failures === 1 || delayMs === backoffCapMs) {
+          logger.error(
+            { error: describeError(error), what, failures },
+            "the consumer waits and tries again",
+          );
+        }
+        await timing.pause(delayMs, false);
+      }
+    }
+  }
+
   async function deadLetter(message: JsMsg, error: unknown): Promise<void> {
     const meta = headers();
     for (const name of copiedHeaders) {
@@ -87,12 +116,37 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
       if (value) meta.set(name, value);
     }
     for (const [name, value] of Object.entries(dlqHeaders(error))) meta.set(name, value);
-    await js.publish(`dlq.${durable}.${message.subject}`, message.data, { headers: meta });
+    const subject = `dlq.${durable}.${message.subject}`;
+    await retrying("DLQ publish", () => js.publish(subject, message.data, { headers: meta }), true);
     message.ack();
     logger.error(
-      { err: error, subject: message.subject, deliveries: message.info.deliveryCount },
+      {
+        error: describeError(error),
+        subject: message.subject,
+        deliveries: message.info.deliveryCount,
+      },
       "message sent to the DLQ",
     );
+  }
+
+  async function run(message: JsMsg, event: E): Promise<void> {
+    const markProcessed = async (session: ClientSession): Promise<void> => {
+      if (!session.inTransaction()) {
+        throw new Error(
+          "Call markProcessed in a transaction: session.withTransaction or also of append",
+        );
+      }
+      await processed.insertOne({ _id: event.eventId, processedAt: new Date() }, { session });
+    };
+    const parent = propagation.extract(ROOT_CONTEXT, {
+      traceparent: message.headers?.get("traceparent") ?? "",
+    });
+    const session = db.client.startSession();
+    try {
+      await context.with(parent, () => handler(event, { session, markProcessed }));
+    } finally {
+      await session.endSession();
+    }
   }
 
   async function handle(message: JsMsg): Promise<void> {
@@ -103,37 +157,33 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
       await deadLetter(message, error);
       return;
     }
-    const markProcessed = async (session: ClientSession): Promise<void> => {
-      await processed.insertOne({ _id: event.eventId, processedAt: new Date() }, { session });
-    };
-    try {
-      if (!(await isProcessed(event.eventId))) {
-        const parent = propagation.extract(ROOT_CONTEXT, {
-          traceparent: message.headers?.get("traceparent") ?? "",
-        });
-        const session = db.client.startSession();
-        try {
-          await context.with(parent, () => handler(event, { session, markProcessed }));
-        } finally {
-          await session.endSession();
-        }
-      }
-      message.ack();
-    } catch (error) {
-      if (await isProcessed(event.eventId)) {
+    const seen = () => retrying("processed check", () => isProcessed(event.eventId));
+    for (let attempt = message.info.deliveryCount; ; attempt += 1) {
+      try {
+        if (!(await seen())) await retrying("handler", () => run(message, event));
         message.ack();
         return;
+      } catch (error) {
+        if (timing.stopped) return;
+        if (await seen()) {
+          message.ack();
+          return;
+        }
+        const next = onFailure(attempt, backoffMs);
+        if (next.action === "dlq") {
+          await deadLetter(message, error);
+          return;
+        }
+        logger.warn(
+          { error: describeError(error), eventId: event.eventId, deliveries: attempt },
+          "the handler failed; the message comes again",
+        );
+        if (!ordered) {
+          message.nak(next.delayMs);
+          return;
+        }
+        if (!(await timing.pause(next.delayMs, false))) return;
       }
-      const next = onFailure(message.info.deliveryCount, backoffMs);
-      if (next.action === "dlq") {
-        await deadLetter(message, error);
-        return;
-      }
-      message.nak(next.delayMs);
-      logger.warn(
-        { err: error, eventId: event.eventId, deliveries: message.info.deliveryCount },
-        "handler failed; the message comes again",
-      );
     }
   }
 
@@ -154,7 +204,10 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
         chain = chain
           .then(() => handle(message))
           .catch((error: unknown) => {
-            logger.error({ err: error, subject: message.subject }, "message handling failed");
+            logger.error(
+              { error: describeError(error), subject: message.subject },
+              "message handling failed",
+            );
           })
           .finally(() => held.delete(message));
       }
@@ -175,7 +228,10 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
         consumer = undefined;
         failures += 1;
         if (failures === 1)
-          logger.warn({ err: error, stream }, "the consumer failed; it tries again");
+          logger.warn(
+            { error: describeError(error), stream },
+            "the consumer failed; it tries again",
+          );
         await timing.pause(backoff(failures), false);
       }
     }

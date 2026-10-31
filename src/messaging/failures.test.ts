@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { NoRespondersError, RequestError, TimeoutError } from "@nats-io/transport-node";
+import { MongoNetworkError, MongoServerError, MongoServerSelectionError } from "mongodb";
 import { z } from "zod";
 import { NotFoundError } from "../http/errors.ts";
-import { backoff, consumerBackoffMs, dlqHeaders, onFailure } from "./index.ts";
+import { backoff, consumerBackoffMs, dlqHeaders, isInfrastructure, onFailure } from "./index.ts";
 import { describeError, headerText } from "./failures.ts";
 
 describe("backoff", () => {
@@ -72,5 +74,50 @@ describe("DLQ headers", () => {
       "error-message": "A value that is not an Error was thrown",
     });
     assert.equal(headerText("é".repeat(10) + "a".repeat(600)).length, 500);
+  });
+});
+
+describe("isInfrastructure", () => {
+  test("MongoDB and NATS outages are infrastructure, also as a cause", () => {
+    const outages: unknown[] = [
+      new MongoNetworkError("connection closed"),
+      new MongoServerSelectionError("no primary", {} as never),
+      new TimeoutError(),
+      new NoRespondersError("dlq.worker.x"),
+      new Error("jetstream is not enabled", { cause: new RequestError("503") }),
+      new Error("a", { cause: new Error("b", { cause: new TimeoutError() }) }),
+      Object.assign(new Error("This socket has been ended by the other party"), { code: "EPIPE" }),
+    ];
+    for (const error of outages) assert.equal(isInfrastructure(error), true);
+  });
+
+  test("handler errors are not infrastructure", () => {
+    const errors: unknown[] = [
+      new Error("bug"),
+      Object.assign(new Error("no file"), { code: "ENOENT" }),
+      new NotFoundError(),
+      new MongoServerError({ message: "E11000 duplicate key", code: 11000 }),
+      "text",
+      undefined,
+    ];
+    for (const error of errors) assert.equal(isInfrastructure(error), false);
+  });
+});
+
+describe("describeError for MongoDB", () => {
+  test("gives the code and name, never the message with key values", () => {
+    const error = new MongoServerError({
+      message: 'E11000 duplicate key error dup key: { _id: "hunter2" }',
+      code: 11000,
+      codeName: "DuplicateKey",
+    });
+    assert.deepEqual(describeError(error), {
+      errorClass: "MongoServerError",
+      message: "MongoDB error 11000 DuplicateKey",
+    });
+    assert.equal(
+      describeError(new MongoServerError({ message: "x" })).message,
+      "MongoDB error unknown",
+    );
   });
 });

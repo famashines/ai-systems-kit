@@ -1,5 +1,5 @@
 export interface Pauser {
-  pause(ms: number, wakeable: boolean): Promise<void>;
+  pause(ms: number, wakeable: boolean): Promise<boolean>;
   wake(): void;
   stop(): void;
   readonly stopped: boolean;
@@ -12,10 +12,10 @@ export function pauser(): Pauser {
   const wakeable = new Set<() => void>();
   return {
     pause: (ms, canWake) =>
-      new Promise<void>((resolve) => {
+      new Promise<boolean>((resolve) => {
         if (stopped || (canWake && woken)) {
           woken = false;
-          resolve();
+          resolve(!stopped);
           return;
         }
         const done = (): void => {
@@ -23,7 +23,7 @@ export function pauser(): Pauser {
           waiting.delete(done);
           wakeable.delete(done);
           woken = false;
-          resolve();
+          resolve(!stopped);
         };
         const timer = setTimeout(done, ms);
         waiting.add(done);
