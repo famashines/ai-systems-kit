@@ -32,8 +32,15 @@ function throwingName(schema: z.ZodType, env: Env): string {
   return "(root)";
 }
 
+function isPlain(value: unknown): value is object {
+  if (Array.isArray(value)) return true;
+  if (typeof value !== "object" || value === null) return false;
+  const proto: unknown = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
 function deepFreeze<T>(value: T): T {
-  if (typeof value === "object" && value !== null && !Object.isFrozen(value)) {
+  if (isPlain(value) && !Object.isFrozen(value)) {
     Object.freeze(value);
     for (const item of Object.values(value)) deepFreeze(item);
   }

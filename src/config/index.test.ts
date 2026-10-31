@@ -92,6 +92,23 @@ test("freezes nested values", () => {
   assert.ok(Object.isFrozen(config.LIST.items));
 });
 
+test("keeps buffers and class instances as they are", () => {
+  const config = loadConfig(
+    z.object({
+      KEY: z.string().transform((text) => Buffer.from(text, "base64")),
+      BYTES: z.string().transform((text) => new TextEncoder().encode(text)),
+      URL: z.string().transform((text) => new URL(text)),
+      TAGS: z.string().transform((text) => new Set(text.split(","))),
+    }),
+    { KEY: "aGVsbG8=", BYTES: "ab", URL: "https://example.com", TAGS: "a,b" },
+  );
+  assert.equal(config.KEY.toString(), "hello");
+  assert.deepEqual([...config.BYTES], [97, 98]);
+  assert.equal(config.URL.host, "example.com");
+  assert.ok(config.TAGS.has("a"));
+  assert.ok(Object.isFrozen(config));
+});
+
 test("names a root issue", () => {
   assert.throws(
     () => loadConfig(z.string(), {}),
