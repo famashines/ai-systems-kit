@@ -26,8 +26,15 @@ One folder for each subpath export in `src/`, with an `index.ts`. Tests are
 API. So `typescript` is `@typescript/typescript6` (only for ESLint), and
 `typescript-7` is TypeScript 7 (for `check` and `build`). The scripts call
 `node_modules/typescript-7/bin/tsc` directly. Do not run `npx tsc`: it
-gives TypeScript 6. Remove the alias when `typescript-eslint` supports
-TypeScript 7.
+gives TypeScript 6. The override `"@typescript/old":
+"npm:typescript@6.0.3"` keeps TypeScript 6 inside the typescript-eslint
+peer range. Decision: ADR 0022. Remove the aliases when `typescript-eslint`
+supports TypeScript 7.
+
+## skipLibCheck
+
+`skipLibCheck` is on because the types of `thread-stream` (from pino) do
+not compile with `@types/node` 26.
 
 ## Telemetry and ESM
 
