@@ -34,6 +34,7 @@ approval of that script: add the package to `allowScripts` in the service
   | `readinessTimeoutMs` (for each check)                               | 2000     |
   | `drainDelayMs`                                                      | 5000     |
   | `shutdownTimeoutMs` (the full shutdown)                             | 19000    |
+  | `hookBudgetMs` (the end part, kept for close hooks)                 | 4000     |
 
 - Order of a request:
 
@@ -75,13 +76,16 @@ approval of that script: add the package to `allowScripts` in the service
   /ready gives 503, all answers get connection: close
   wait drainDelayMs (still accepting, so Traefik removes the pod)
   server.close(), close idle sockets, wait for in-flight requests
-  close hooks in reverse order
-  all of it inside shutdownTimeoutMs; at the deadline: close the sockets
+    until shutdownTimeoutMs - hookBudgetMs, then close the open sockets
+  close hooks one after the other, in reverse order, until shutdownTimeoutMs
   ```
 
   `close()` gives `true` if all of it ended in time with no hook error.
   `handleSignals()` then exits with 0, else with 1. Calling it twice has no
   effect.
+
+- `close()` also waits `drainDelayMs` (5 s by default). Tests pass
+  `drainDelayMs: 0`.
 
 ## `./config`
 
@@ -101,9 +105,13 @@ approval of that script: add the package to `allowScripts` in the service
   is one of: `authorization`, `proxyauthorization`, `cookie`, `setcookie`,
   `token`, `accesstoken`, `refreshtoken`, `idtoken`, `apikey`, `xapikey`,
   `password`, `secret`, `clientsecret`, `prompt`, `messages`.
-- Limit: the censor looks at keys only. A secret inside a string (the log
-  message, an error message) is not redacted. Do not put secrets or prompt
-  text in strings.
+- `URL` objects are logged with `[Redacted]` in place of the user name and
+  the password. Errors keep their class name in `type`.
+- Limits: the censor looks at keys only. A secret inside a string (the log
+  message, an error message, a URL query) is not redacted. Other objects
+  with `toJSON` (for example `Date`, `Buffer`) are logged as `toJSON` gives
+  them, with no censor. Do not put secrets or prompt text in strings or in
+  such objects.
 - `startTelemetry({ serviceName, release, metricsPort })` starts the
   OpenTelemetry Node SDK with http and undici instrumentation and the env
   and service instance resource detectors only. Traces go over OTLP only
