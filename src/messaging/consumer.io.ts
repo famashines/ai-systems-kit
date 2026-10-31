@@ -214,6 +214,7 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
             },
             () => true,
           );
+          if (await seen()) return;
         }
       }
     };

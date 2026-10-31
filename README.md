@@ -312,7 +312,9 @@ const consumer = startConsumer({
   `ping` to the consumer `db` and a NATS ping, with a 2 s limit. If one of
   them fails, MongoDB or NATS is down: the kit keeps the message, waits
   until both answer again, and then runs the handler again (no new
-  delivery). If both answer, the error is a handler failure and counts as
+  delivery). Before it runs the handler again, it checks the `processed`
+  marker again: a long outage can give the message to another pod, and if
+  that pod processed it, the kit acks it with no new run. If both answer, the error is a handler failure and counts as
   a delivery (nak with the backoff, or the ordered local retry, then the
   DLQ after 5 tries). So a handler bug that throws an error which looks
   like a network error still goes to the DLQ.
