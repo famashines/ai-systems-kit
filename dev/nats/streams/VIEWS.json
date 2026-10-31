@@ -12,7 +12,7 @@
   "max_msgs": -1,
   "max_msgs_per_subject": -1,
   "max_msg_size": -1,
-  "max_consumers": -1,
+  "max_consumers": 64,
   "duplicate_window": 600000000000,
   "deny_delete": false,
   "deny_purge": false,
