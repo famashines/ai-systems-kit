@@ -24,8 +24,8 @@ One folder for each subpath export in `src/`, with an `index.ts`. Tests are
 
 `typescript-eslint` needs the TypeScript 6 API, and TypeScript 7 has no JS
 API. So `typescript` is `@typescript/typescript6` (only for ESLint), and
-`typescript7` is TypeScript 7 (for `check` and `build`). The scripts call
-`node_modules/typescript7/bin/tsc` directly. Do not run `npx tsc`: it
+`typescript-7` is TypeScript 7 (for `check` and `build`). The scripts call
+`node_modules/typescript-7/bin/tsc` directly. Do not run `npx tsc`: it
 gives TypeScript 6. Remove the alias when `typescript-eslint` supports
 TypeScript 7.
 

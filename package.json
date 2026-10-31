@@ -30,9 +30,9 @@
     }
   },
   "scripts": {
-    "build": "node node_modules/typescript7/bin/tsc -p tsconfig.build.json",
+    "build": "node node_modules/typescript-7/bin/tsc -p tsconfig.build.json",
     "prepare": "npm run build",
-    "check": "node node_modules/typescript7/bin/tsc --noEmit",
+    "check": "node node_modules/typescript-7/bin/tsc --noEmit",
     "lint": "eslint . && prettier --check .",
     "format": "prettier --write .",
     "test": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=85 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' 'src/**/*.test.ts'",
@@ -46,18 +46,24 @@
     "@opentelemetry/instrumentation-undici": "0.34.0",
     "@opentelemetry/resources": "3.0.0",
     "@opentelemetry/sdk-node": "0.300.0",
-    "pino": "10.4.0",
-    "zod": "4.6.7"
+    "pino": "10.4.0"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
     "eslint": "10.14.0",
     "prettier": "3.9.10",
     "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-7": "npm:typescript@7.0.2",
     "typescript-eslint": "8.72.1",
-    "typescript7": "npm:typescript@7.0.2"
+    "zod": "4.6.7"
   },
   "allowScripts": {
     "protobufjs": false
+  },
+  "peerDependencies": {
+    "zod": "^4.6.7"
+  },
+  "overrides": {
+    "@typescript/old": "npm:typescript@6.0.3"
   }
 }
