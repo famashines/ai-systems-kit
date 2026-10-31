@@ -602,6 +602,51 @@ describe("durable consumer", () => {
     assert.equal((await deliveries()) - before, 1);
   });
 
+  test("MongoDB cut while the handler runs, and another pod processes the event: the handler does not run again", async () => {
+    const target = new URL(mongo.url);
+    const gate = await tcpGate(target.hostname, Number(target.port));
+    const proxied = await connectMongo({
+      url: `mongodb://127.0.0.1:${String(gate.port)}/?directConnection=true`,
+      database: "messaging",
+      clientOptions: { serverSelectionTimeoutMS: 500 },
+    });
+    track({ close: () => proxied.close() });
+    const event = envelope();
+    let calls = 0;
+    const consumer = track(
+      startConsumer({
+        nats: worker,
+        db: proxied.db,
+        stream: "ORCHESTRATION",
+        filter: "orchestration.TaskSubmitted",
+        backoffMs: fast,
+        handler: async (received, { session, markProcessed }) => {
+          calls += 1;
+          if (calls === 1) await gate.cut();
+          await session.withTransaction(async () => {
+            await proxied.db
+              .collection<{ _id: string }>("effects")
+              .insertOne({ _id: received.eventId }, { session });
+            await markProcessed(session);
+          });
+        },
+      }),
+    );
+    await waitFor(() => consumer.ready());
+    const before = await deliveries();
+    await publish(event.type, JSON.stringify(event));
+    await waitFor(() => calls === 1);
+    await sleep(2000);
+    await processed().insertOne({ _id: event.eventId });
+    await gate.open();
+    await waitFor(drained);
+    await consumer.close();
+    await gate.close();
+    assert.equal(calls, 1);
+    assert.equal(await effects().countDocuments({ _id: event.eventId }), 0);
+    assert.equal((await deliveries()) - before, 1);
+  });
+
   test("a DLQ publish that fails for a while: the message is in the DLQ later", async () => {
     await manager.streams.delete("DLQ");
     const event = envelope();
