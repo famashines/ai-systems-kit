@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { after, before, describe, test } from "node:test";
-import { EventEnvelopeV1 } from "@famashines/ai-systems-contracts";
+import { EventEnvelopeV1, TaskSubmittedEventPayloadV1 } from "@famashines/ai-systems-contracts";
 import {
   jetstream,
   jetstreamManager,
@@ -205,6 +205,7 @@ describe("outbox relay", () => {
         },
         nats: worker,
         streams: ["ORCHESTRATION"],
+        pollMs: 60_000,
       }),
     );
     await waitFor(async () => (await store.pending(10)).length === 0);
@@ -271,26 +272,42 @@ describe("durable consumer", () => {
 
   test("a handler that throws twice then works has its effect once; a later copy has no effect", async () => {
     const event = envelope();
-    const deliveries: number[] = [];
-    const consumer = await consume(async (received, { session, markProcessed }) => {
-      deliveries.push(deliveries.length + 1);
-      if (deliveries.length < 3) throw new Error("not yet");
-      await session.withTransaction(async () => {
-        await effects().insertOne({ _id: received.eventId }, { session });
-        await markProcessed(session);
+    const calls: number[] = [];
+    const store = createEventStore(db);
+    const effect = (eventId: string) => store.readStream(`effect-${eventId}`);
+    const consumer = await consume(async (received, { markProcessed }) => {
+      calls.push(calls.length + 1);
+      if (calls.length < 3) throw new Error("not yet");
+      await store.append({
+        streamId: `effect-${received.eventId}`,
+        expectedVersion: 0,
+        events: [
+          {
+            type: "orchestration.TaskSubmitted",
+            schemaVersion: 1,
+            correlationId: received.correlationId,
+            causationId: received.eventId,
+            actor: { kind: "system", id: "worker" },
+            payload: TaskSubmittedEventPayloadV1.parse(received.payload),
+          },
+        ],
+        also: markProcessed,
       });
     });
     await publish(event.type, JSON.stringify(event));
-    await waitFor(async () => (await effects().countDocuments({ _id: event.eventId })) === 1);
+    await waitFor(async () => (await effect(event.eventId)).length === 1);
     await publish(event.type, JSON.stringify(event));
     const marker = envelope();
     await publish(marker.type, JSON.stringify(marker));
-    await waitFor(() => deliveries.length === 4);
+    await waitFor(() => calls.length === 4);
     await waitFor(drained);
+    const start = performance.now();
     await consumer.close();
-    assert.equal(await effects().countDocuments({ _id: event.eventId }), 1);
+    assert.ok(performance.now() - start < 1000, "the close of an idle consumer is fast");
+    assert.equal((await effect(event.eventId)).length, 1);
+    assert.equal((await effect(marker.eventId)).length, 1);
     assert.ok(await processed().findOne({ _id: event.eventId }));
-    assert.equal(deliveries.length, 4);
+    assert.equal(calls.length, 4);
   });
 
   test("a duplicate key on the processed marker from another pod is acked with no retry", async () => {

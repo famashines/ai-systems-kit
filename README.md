@@ -245,7 +245,9 @@ const consumer = startConsumer({
 
 - `connectNats({ servers, user, pass, service, logger })` gives
   `{ connection, service, logger, ready, close, request, serve }`. The inbox
-  prefix is `_INBOX_<service>` (ADR 0023). It reconnects with no limit.
+  prefix is `_INBOX_<service>` (ADR 0023). It waits for the first
+  connection, so a service starts its HTTP server only after NATS answers.
+  It reconnects with no limit.
   `ready` sends a ping. `close` drains the connection.
 - `startRelay({ store, nats, streams, pollMs = 1000, batch = 100 })` gives
   `{ ready, close }`. It wakes on a change stream of `events` and also

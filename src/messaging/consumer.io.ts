@@ -139,6 +139,7 @@ export function startConsumer<E extends EventEnvelopeV1 = RegisteredEvent>(
 
   async function pull(from: Consumer): Promise<void> {
     messages = await from.fetch({ max_messages: options.batch ?? 10, expires: 5000 });
+    if (timing.stopped) await messages.close();
     const held = new Set<JsMsg>();
     const timer = setInterval(
       () => {
