@@ -5,7 +5,7 @@ import {
   type RegisteredEvent,
 } from "@famashines/ai-systems-contracts";
 import type { ClientSession } from "mongodb";
-import { ConflictError } from "../http/errors.ts";
+import { ConflictError, DomainError } from "../http/errors.ts";
 
 export class ConcurrencyError extends ConflictError {
   constructor(message = "The stream changed, reload it") {
@@ -56,6 +56,14 @@ export interface Rules<E extends EventEnvelopeV1> {
   now: () => Date;
 }
 
+export const maxEventBytes = 900 * 1024;
+
+export function checkSize(event: unknown): void {
+  if (Buffer.byteLength(JSON.stringify(event)) > maxEventBytes) {
+    throw new DomainError("payload_too_large", 413, "The event is larger than 900 KiB");
+  }
+}
+
 export function checkVersion(last: number, expected: number | undefined): void {
   if (expected !== undefined && expected !== last) throw new ConcurrencyError();
 }
@@ -81,15 +89,17 @@ export function rules<E extends EventEnvelopeV1>(options: StoreOptions<E>): Rule
   const newId = options.newId ?? randomUUID;
   return {
     build: (streamId, events, last) =>
-      events.map((event, index) =>
-        parse({
+      events.map((event, index) => {
+        const built = parse({
           ...event,
           eventId: newId(),
           streamId,
           version: last + index + 1,
           occurredAt: now().toISOString(),
-        }),
-      ),
+        });
+        checkSize(built);
+        return built;
+      }),
     decode: (raw) => parse(upcast(raw, upcasters)),
     now,
   };

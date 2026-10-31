@@ -185,6 +185,6 @@ export function createEventStore<E extends EventEnvelopeV1 = RegisteredEvent>(
       await events.updateOne({ _id: eventId, publishedAt: null }, { $set: { publishedAt: now() } });
     },
 
-    watch: () => events.watch([{ $match: { operationType: "insert" } }]),
+    watch: () => events.watch([{ $match: { operationType: "insert" } }, { $project: { _id: 1 } }]),
   };
 }

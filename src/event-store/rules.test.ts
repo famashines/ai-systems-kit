@@ -3,7 +3,7 @@ import { describe, test } from "node:test";
 import { EventEnvelopeV1 } from "@famashines/ai-systems-contracts";
 import { z } from "zod";
 import { ConflictError, DomainError } from "../http/errors.ts";
-import { checkVersion, ConcurrencyError, upcast, type Upcasters } from "./index.ts";
+import { checkVersion, ConcurrencyError, maxEventBytes, upcast, type Upcasters } from "./index.ts";
 import { rules } from "./rules.ts";
 
 const id = (n: number): string => `6f1c3c7e-2d0a-4f3b-9a7e-${String(n).padStart(12, "0")}`;
@@ -107,6 +107,14 @@ describe("rules", () => {
       ],
     );
     assert.throws(() => build("not a stream id", [draft], 0), z.ZodError);
+    const open = rules({ parse: (input) => EventEnvelopeV1(z.unknown()).parse(input) });
+    const sized = (bytes: number) => ({ ...draft, payload: "x".repeat(bytes) });
+    assert.equal(open.build(`task-${id(3)}`, [sized(maxEventBytes - 1000)], 0).length, 1);
+    assert.throws(
+      () => open.build(`task-${id(3)}`, [sized(maxEventBytes)], 0),
+      (error: unknown) =>
+        error instanceof DomainError && error.code === "payload_too_large" && error.status === 413,
+    );
   });
 
   test("decode upcasts, then parses, and strips stored fields", () => {

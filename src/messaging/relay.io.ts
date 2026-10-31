@@ -1,9 +1,10 @@
 import { jetstream, jetstreamManager } from "@nats-io/jetstream";
 import { headers } from "@nats-io/transport-node";
+import { metrics, type ObservableResult } from "@opentelemetry/api";
 import type { MongoEventStore } from "../event-store/store.io.ts";
 import type { CloseHook, ReadinessCheck } from "../http/server.ts";
 import type { Nats } from "./connect.io.ts";
-import { backoff } from "./failures.ts";
+import { backoff, backoffCapMs, describeError } from "./failures.ts";
 import { pauser } from "./pause.ts";
 
 export interface RelayOptions {
@@ -27,18 +28,35 @@ export function startRelay(options: RelayOptions): Relay {
   const js = jetstream(nats.connection);
   const manager = jetstreamManager(nats.connection, { checkAPI: false });
   const timing = pauser();
+  const meter = metrics.getMeter("ai-systems-kit");
+  const failed = meter.createCounter("outbox_publish_failures", {
+    description: "Outbox relay batches that failed",
+  });
+  const oldest = meter.createObservableGauge("outbox_oldest_pending_seconds", {
+    description: "Age of the oldest event that the relay did not publish yet",
+  });
+  let oldestAt: number | undefined;
+  const observe = (result: ObservableResult): void => {
+    result.observe(oldestAt === undefined ? 0 : (Date.now() - oldestAt) / 1000);
+  };
+  oldest.addCallback(observe);
   const changes = store.watch();
   changes.on("change", () => {
     timing.wake();
   });
   changes.on("error", (error) => {
-    logger.warn({ err: error }, "the outbox change stream failed; the relay still polls");
+    logger.warn(
+      { error: describeError(error) },
+      "the outbox change stream failed; the relay still polls",
+    );
   });
 
   async function publishPending(): Promise<number> {
     let sent = 0;
     for (;;) {
       const pending = await store.pending(batch);
+      const first = pending[0]?.envelope.occurredAt;
+      oldestAt = first === undefined ? undefined : Date.parse(first);
       for (const { envelope, traceparent } of pending) {
         const meta = headers();
         meta.set("correlation-id", envelope.correlationId);
@@ -65,7 +83,13 @@ export function startRelay(options: RelayOptions): Relay {
         failures = 0;
       } catch (error) {
         failures += 1;
-        if (failures === 1) logger.warn({ err: error }, "the outbox relay failed; it tries again");
+        failed.add(1);
+        if (failures === 1 || backoff(failures) === backoffCapMs) {
+          logger.error(
+            { error: describeError(error), failures },
+            "the outbox relay failed; it tries again",
+          );
+        }
       }
       await (failures > 0 ? timing.pause(backoff(failures), false) : timing.pause(pollMs, true));
     }
@@ -83,6 +107,7 @@ export function startRelay(options: RelayOptions): Relay {
     },
     close: async () => {
       timing.stop();
+      oldest.removeCallback(observe);
       await changes.close();
       await loop;
     },

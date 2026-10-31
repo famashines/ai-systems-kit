@@ -1,6 +1,8 @@
 export {
   ConcurrencyError,
+  checkSize,
   checkVersion,
+  maxEventBytes,
   upcast,
   type AppendInput,
   type AppendResult,
